@@ -1,0 +1,302 @@
+FreedcampAngular.filter('object2Array', function() {
+    return function(input) {
+        var out = [];
+        for(var i in input){
+            out.push(input[i]);
+        }
+        return out;
+    }
+}).controller('ProjectPickerController', function($scope, $rootScope, $timeout, $document, $element) {
+    $scope.nameToIconList = {
+        'todos': 'todos', 'discussions': 'discussions', 'milestones': 'milestones', 'time': 'time', 'files': 'files', 'wiki': 'wiki', 'calendar': 'calendar', 'wall': 'wall', 'passman': 'passman', 'bugtracker': 'bugtracker', 'crm': 'crm', 'invoicesplus': 'invoicesplus', 'overview': 'overview'
+    };
+    $rootScope.nameToIcon = function(name) {
+        return '#'+(typeof $scope.nameToIconList[name] !== "undefined" ? $scope.nameToIconList[name] : 'puzzle');
+    };
+    var isMac = navigator.platform.toUpperCase().indexOf('MAC')>=0;
+    $scope.gKey = 71;
+    $scope.ctrlg = isMac ? "Command + G" : "Ctrl + G";
+    $scope.switcher = angular.element(".fc_switcher_projects_list");
+    $scope.fc_switcher_opened = false;
+    $scope.fc_switcher_tips = false;
+    $scope.fc_switcher_typed_text = {};
+    $scope.fc_switcher_selected_text = "";
+    $scope.sortTypeAlphabetical = {group:'user_order',project:'project_order'};
+    $scope.sortTypeOrder = {group:'user_order',project:'project_order'};
+    $scope.sortType = fc.headerSortType;
+    $scope.sortTypeP = "name" === fc.headerSortType ? "project_name" : "project_order";
+    $scope.switchOrderType = function(sort_type) {
+        $scope.sortType = sort_type;
+        if (sort_type === "name") {
+            $scope.sortTypeP = "project_name";
+        } else {
+            $scope.sortTypeP = "project_order";
+        }
+        ajaxRequest(base_url + "manage/account/set_data", {type: "f_switcher_order", value: sort_type },function(){});
+    };
+    $document.bind("keydown", function(e){
+        $scope.handleArrowKeys(e);
+    });
+    $scope.$watch('fc_switcher_typed_text.text', function(val,old_val) {
+        var $search_results_projects = $(".fc_projects").find(".name:Contains(" + val + ")");
+        var $search_results_groups = $(".fc_group").find("> .name:Contains(" + val + ")");
+        
+        $search_results_groups.parents(".fc_group_wrap").find('.fc_project_item .name').each(function(){
+            $search_results_projects.push($(this)[0]);
+        });
+
+        var search_result = $search_results_projects.first();
+        $(".fc_project").removeClass("hide").addClass("hide");
+        $search_results_projects.parents(".fc_project").removeClass("hide");
+        $(".fc_groups .fc_group_wrap").show();
+        $(".fc_groups .fc_group_wrap").each(function(){
+            if( !$(this).find(".fc_project:not(.hide)").length ) {
+                $(this).hide();
+            }
+        });
+        $search_results_groups.parents(".fc_group_wrap").show();
+        $(".fc_group:not(.hide), .fc_project:not(.hide)").each(function () {
+            var $th = $(this).find(".name");
+            var matchStart = $th.text().toLowerCase().indexOf("" + val.toLowerCase() + "");
+            if (matchStart === -1) {
+                // clear previously higlighted result
+                var text = $th.html();
+                if (text.indexOf("em") !== -1) {
+                   $th.html(text.replace("<em>", "").replace("</em>", ""));
+                }
+                return;
+            }
+            var matchEnd = matchStart + val.length - 1;
+            var beforeMatch = $th.text().slice(0, matchStart);
+            var matchText = $th.text().slice(matchStart, matchEnd + 1);
+            var afterMatch = $th.text().slice(matchEnd + 1);
+            $th.html(beforeMatch + "<em>" + matchText + "</em>" + afterMatch);
+        });
+        if(!val) {
+            $scope.setCurrentActiveProject(); // Revert back to currently active project
+        } else {
+            $scope.setActiveProject(search_result.parents(".fc_project"),true);
+        }
+    });
+    $scope.project_color = function(color) {
+        return "#"+color.replace("#","");
+    };
+    $scope.isEmpty = function(val){ return fc.isEmpty(val) };
+
+    $document.bind('click',function(e){
+        if (!$(e.target).parents(".fc_project_switcher").length && $scope.fc_switcher_opened) {
+            $scope.closeProjectPicker();
+        }
+    });
+    $scope.projects_all = fc.basic_groups_data;
+
+    $scope.project_picker_groups = localStorage.getItem("fc_project_groups") ? JSON.parse(localStorage.getItem("fc_project_groups")) : [];
+
+    $scope.groupToggle = function(groupid) {
+        // Make sure they don't collapse all groups
+        var group_in_array = $scope.project_picker_groups.indexOf(groupid);
+        if( group_in_array === -1 ) {
+            if (Object.keys($scope.projects_all).length > $scope.project_picker_groups.length + 1) {
+                $scope.$evalAsync(function () {
+                    $scope.project_picker_groups.push(groupid);
+                });
+            }
+        } else {
+            $scope.project_picker_groups.splice(group_in_array, 1);
+        }
+        $timeout(function(){
+            if(!$('.fc_project.active').is(':visible')) {
+                $scope.setActiveProject($(".fc_group_wrap:not(.collapsed)").first().find(".fc_project").first(), true);
+            }
+        }, 350);
+        localStorage.setItem("fc_project_groups", JSON.stringify($scope.project_picker_groups));
+    };
+    $scope.closeProjectPicker = function(){
+        $scope.deactivateWheelControl();
+        $scope.switcher.find(".fc_project.active").removeClass("active");
+        $scope.switcher.find(".fc_app").removeClass("active");
+        $scope.$evalAsync(function () {
+            $scope.fc_switcher_opened = false;
+            $scope.fc_switcher_tips = false;
+        });
+        if (fc.isMobileVersion) {
+            $("body").removeClass("fc_project_switcher_active");
+        }
+    };
+    $scope.setCurrentActiveProject = function() {
+        try {
+            if ($(".current_project .project_name").hasClass("choose_project")) {
+                $scope.setActiveProject($scope.switcher.find(".fc_project").first());
+            } else {
+                $scope.setActiveProject($scope.switcher.find(".fc_project[data-unique='"+$('.current_project .project_name').attr('data-unique')+"']"));
+            }
+        } catch (e) {}
+    };
+    $scope.openProjectPicker = function(){
+        if (fc.isMobileVersion) {
+            $("body").addClass("fc_project_switcher_active");
+        }
+        $scope.fc_switcher_typed_text.text = "";
+        $(".fc_switcher_typed_value:not(.empty_value)").addClass("empty_value");
+        $timeout(function(){
+            $scope.fc_switcher_opened = true;
+            setTimeout(function() {
+                $scope.setCurrentActiveProject();
+            }, 0);
+            setTimeout(function() {
+                $(".typed_value").focus();
+            },800);
+            
+        },10,true);
+        $scope.activateWheelControl();
+    };
+    $scope.openProject = function(event, url) {
+        var target = $(event.target);
+        if (!target.parents(".fc_app").length && !(event.ctrlKey || event.metaKey)) {
+            document.location.href = url;
+        }
+    };
+
+    $scope.toggleProjectPicker = function() {
+        if (!$scope.showSwitcher) {
+            $scope.showSwitcher = true;
+            $scope.openProjectPicker();
+            return;
+        }
+        if ($scope.fc_switcher_opened) {
+            $scope.closeProjectPicker();
+        } else {
+            $scope.openProjectPicker();
+        }
+    };
+    
+    $scope.toggleTipsExplanation = function(){
+        $scope.fc_switcher_tips = !$scope.fc_switcher_tips;
+    }
+
+    $scope.setActiveProject = function($elem,isJq) {
+        $scope.$lib = isJq ? $ : angular.element;
+        $scope.$lib(".fc_project.active").removeClass("active");
+        $scope.$lib(".fc_app.active").removeClass("active");
+        $elem.addClass("active");
+        if($elem.data('unique') == project_unique_name) {
+            $elem.find(".fc_app[data-app-unique='" + fc.currentApp + "']").addClass("active");
+        } else {
+            $elem.find(".fc_app").first().addClass("active");
+        }
+        var $groups = $(".fc_groups");
+        try {
+            if ($(".fc_project.active").length) {
+                setTimeout(function () {
+                    $groups.scrollTo(".fc_project.active", 300, 30);
+                }, 300);
+            }
+        } catch (e) {
+        }
+    };
+
+    $scope.handleArrowKeys = function(e) {
+        if ((e.ctrlKey || e.metaKey) && (e.keyCode == $scope.gKey)) {
+            e.preventDefault();
+            $scope.toggleProjectPicker();
+            return false;
+        }
+        if ($scope.fc_switcher_opened) {
+            // On escape clear field and close picker
+            if ( e.keyCode == 27 ) {
+                $scope.toggleProjectPicker();
+            }
+
+            var $active = $(".fc_project.active");
+            var $active_app = $(".fc_app.active");
+            switch(e.which) {
+                case 38: // up
+                    // Check if there IS a previous to go to
+                    if ($active.prev(".fc_project:not(.hide)").length) {
+                        $scope.setActiveProject($active.prev(".fc_project:not(.hide)"));
+                    } else {
+                        // Seems we are at the end of the list in this node, is there a next node with projects?
+                        var $parent = $active.parents(".fc_group_wrap");
+                        // If there is a previous group
+                        if ( $parent.prev(".fc_group_wrap").length ) {
+                            var $previous_parent = $parent.prev(".fc_group_wrap");
+                            // Keep going back until we find a non-collapsed group
+                            while ($previous_parent.length) {
+                                if (!$previous_parent.hasClass("collapsed") && $previous_parent.is(":visible")) {
+                                    $scope.setActiveProject($previous_parent.find(".fc_project:not(.hide)").last());
+                                    break;
+                                }
+                                $previous_parent = $previous_parent.prev(".fc_group_wrap");
+                            }
+                        }
+                    }
+                    break;
+                case 40: // down
+                    // Check if there IS a next to go to
+                    if ($active.next(".fc_project:not(.hide)").length) {
+                        $scope.setActiveProject($active.next(".fc_project:not(.hide)"));
+                    } else {
+                        // Seems we are at the end of the list in this node, is there a next node with projects?
+                        var $parent = $active.parents(".fc_group_wrap");
+                        // If there is a previous group
+                        if ( $parent.next(".fc_group_wrap").length ) {
+                            var $next_parent = $parent.next(".fc_group_wrap");
+                            // Keep going forward until we find a non-collapsed group
+                            while ($next_parent.length) {
+                                if (!$next_parent.hasClass("collapsed") && $next_parent.is(":visible")) {
+                                    $scope.setActiveProject($next_parent.find(".fc_project:not(.hide)").first());
+                                    break;
+                                }
+                                $next_parent = $next_parent.next(".fc_group_wrap");
+                            }
+                        }
+                    }
+                    break;
+                case 37: // left
+                    // Check if there IS a previous to go to
+                    if ($active_app.prev(".fc_app").length) {
+                        $active_app.removeClass("active").prev(".fc_app").addClass("active");
+                    }
+                    break;
+                case 39: // right
+                    if ($active_app.next(".fc_app").length) {
+                        $active_app.removeClass("active").next(".fc_app").addClass("active");
+                    }
+                    break;
+                case 13: // enter
+                    $active.find(".fc_app.active a")[0].click()
+                    break;
+                default: return; // exit this handler for other keys
+            }
+            e.preventDefault(); // prevent the default action (scroll / move caret)
+        }
+    };
+
+    // Prevent body from scrolling when inside project picker
+    $scope.activateWheelControl = function() {
+        if (fc.isMobileVersion) {
+            return;
+        }
+        $(".fc_project_switcher").on("mousewheel", ".fc_groups", function (e) {
+            var delta = e.wheelDelta || (e.originalEvent && e.originalEvent.wheelDelta) || -e.detail,
+                bottomOverflow = this.scrollTop + $(this).outerHeight() - this.scrollHeight >= 0,
+                topOverflow = this.scrollTop <= 0;
+
+            if ((delta < 0 && bottomOverflow) || (delta > 0 && topOverflow)) {
+                e.preventDefault();
+            }
+        });
+    };
+
+    $scope.deactivateWheelControl = function() {
+        if (fc.isMobileVersion) {
+            return;
+        }
+        $(".fc_project_switcher").off("mousewheel", ".fc_groups");
+    };
+
+    // custom css expression for a case-insensitive contains()
+    jQuery.expr[':'].Contains = function(a,i,m){
+        return (a.textContent || a.innerText || "").toUpperCase().indexOf(m[3].toUpperCase())>=0;
+    };
+});

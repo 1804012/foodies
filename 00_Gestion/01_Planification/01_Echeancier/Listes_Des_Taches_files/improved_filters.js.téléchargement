@@ -1,0 +1,952 @@
+/* global fc */
+
+var fcif = {};
+fcif.APPLY_FILTERS_DELAY_MS = 1250;
+fcif.min_search_substring_length = 4;
+fcif.bt_data_last = null;
+fcif.update_success_message = null;
+fcif.warn_msg = false;
+fcif.update_timeout_handler = null;
+fcif.applied_string_hash = '';
+fcif.active_search_prefix = url_to_application;
+fcif.active_search_unique_id = "fc_active_search_" + fcif.active_search_prefix;
+// temp solution to make searches work properly for milestones after removing old.
+if (fc.fcif_milestones) {
+    fcif.additional_active_search_unique_id = fcif.active_search_unique_id;
+    fcif.active_search_unique_id += '_new';
+}
+if (fc.fcif_store_suffix) {
+    fcif.active_search_unique_id += fc.fcif_store_suffix;
+    if (fc.fcif_milestones) {
+        fcif.additional_active_search_unique_id += fc.fcif_store_suffix;
+    }
+}
+fcif.applied_instant_hash = '';
+fcif.ignore_absent_property = false;
+fcif.present_data_conditions = {};
+fcif.conditions_for_outer_data_fetch = {};
+fcif.last_search_id = 0;
+fcif.active_search_id = 0;
+fcif.f_ignore_datepicker_changed = false;
+
+// flag added to prevent clearing url on apply_filters() first call
+// if true, we shouldn't cut conditions in url (location.search)
+fcif.f_cond_inited_from_url = false;
+
+$(function(){
+    fcif.prepare_improved_filters();
+});
+
+// parsing conditions from GET parameters
+fcif.get_conditions_from_url = function() {
+    if (!location.search) {
+        return false;
+    }
+    var trimmed = location.search.substr(1);
+    var parsed_data = deparam(trimmed);
+
+    if (!parsed_data.f_fiu) {
+        return false;
+    }
+
+    return parsed_data;
+}
+
+fcif.prepare_improved_filters = function () {
+    if (typeof fc.min_search_substring_length !== "undefined") {
+        fcif.min_search_substring_length = fc.min_search_substring_length;
+    }
+
+    if (typeof fc.fcif_ignore_absent_property !== "undefined") {
+        fcif.ignore_absent_property = fc.fcif_ignore_absent_property;
+    }
+
+    fcif.init_fromto_fields();
+
+    if (typeof saved_searches !=='undefined') {
+        for (var key in saved_searches) {
+            f_show_info = false;
+            fcif.add_saved_search_line(saved_searches[key]);
+        }
+    }
+
+    if (typeof search_data != 'undefined') { //when app subscription expired
+        if (!search_data) {
+            search_data = {};
+            var cond_data = {};
+
+            var url_data = fcif.get_conditions_from_url();
+            if (url_data) {
+                cond_data.conditions = url_data;
+                cond_data.conditions.f_from_url = true; // flag which shows if we can save current conditions in session or local storage (true - don't save)
+                fcif.f_cond_inited_from_url = true; // indicates that conditions were parsed from url, used in apply_filters(), condition to clear the browser url
+                fc.logEvent("filters_in_url", "used");
+            } else {
+                // no data in the session, trying to restore from the local storage
+                cond_data = store.get(fcif.active_search_unique_id) || {};
+            }
+
+            // handling today/tomorrow conversion
+            if (cond_data.conditions && cond_data.conditions.filter) {
+                if (cond_data.conditions.filter.due_date && (cond_data.conditions.filter.due_date.indexOf("1") + 1)) {
+                    cond_data.conditions.filter.due_date.push('ftoday');
+                    cond_data.conditions.filter.due_date.push('ftomorrow');
+                }
+                if (cond_data.conditions.filter.start_date && (cond_data.conditions.filter.start_date.indexOf("1") + 1)) {
+                    cond_data.conditions.filter.start_date.push('ftoday');
+                    cond_data.conditions.filter.start_date.push('ftomorrow');
+                }
+            }
+
+            if (typeof cond_data.conditions !== "undefined") {
+                // new data, includes search_id
+                search_data = cond_data;
+            } else {
+                // #9509431 old data
+                search_data.conditions = cond_data;
+            }
+        } else {
+            if (fcif.get_conditions_from_url()) {
+                search_data.conditions.f_from_url = true;
+                fcif.f_cond_inited_from_url = true;
+            }
+        }
+
+        fcif.apply_stored_search(search_data.conditions, search_data.search_id);
+        if (search_data.search_id) {
+            fcif.activate_saved_search(search_data.search_id);
+        }
+    }
+
+    $("#improved_filters .dd_suboptions .dd_option").click(function(e) {
+        var target = $(e.target);
+        if (target.is("input")) {
+            // datepicker click
+            return false;
+        }
+        if (target.parents(".flatpickr-calendar.static").length) {
+            // datepicker popup arrows click
+            return false;
+        }
+        var f_manual_ordering = false;
+        if (target.parents(".sort_options_dropdown").length) {
+            f_manual_ordering = true;
+        }
+
+        var option = $(this);
+        var f_fromto = option.hasClass("fromto");
+        if (f_fromto && !option.hasClass('active')) {
+            // we should not activate fromto filter by clicking not in input
+            return false;
+        }
+
+        fcif.on_dd_option_click(option, 0, 0, e, f_manual_ordering);
+        return false;
+    });
+
+    $("#improved_filters .fcif_flag").click(function(){
+        fcif.on_flag_click($(this));
+    });
+
+    $("#improved_filters .dd_group_containter").click(function(e) {
+        fcif.on_dd_group_click($(this));
+        return false;
+    });
+
+    $(".remove_sorting").click(function(){
+        fcif.remove_sorting();
+    });
+
+    $('#bt_search_substr').bind('textchange', function () {
+        fcif.on_search_textchange($(this));
+    });
+
+    $(".saved_search_div:not(.saved_searches_title)").click(function(){
+        fcif.on_saved_search_click($(this));
+    });
+
+    $(".delete_saved_search").click(function(e){
+        e.preventDefault();
+        e.stopPropagation();
+        $(".jtip_standard").hide();
+        $th = $(this);
+        fc.confirmDialog($th,($th.data("callback"))?$th.data("callback"):$th.attr("href"));
+    });
+
+    $("#show_all_btn").click(function() {
+        fcif.remove_sorting(true);
+    });
+};
+
+fcif.init_fromto_fields = function() {
+    var inputs = $(".dd_option.fromto input");
+    inputs.on("fkitDateChange", function(e) {
+        if (fcif.f_ignore_datepicker_changed) {
+            return;
+        }
+        fcif.update_datepicker_date($(this));
+        fcif.on_dd_option_click($(this).parents('.dd_option'), 0, true);
+        $(document).off("mousemove");
+        // Check to make sure mouse is still in dropdown otherwise hide dropdowns
+        setTimeout(function() {
+            $(document).on("mousemove",function(event) {
+                $(document).off("mousemove");
+                if (!$(event.target).parents(".is_active").length) {
+                    fkit.closeAllFkitDropdowns();
+                }
+            });
+        }, fcif.APPLY_FILTERS_DELAY_MS);
+    });
+    
+    inputs.on("fkitDateOpen", function(e) {
+        var $fromto = $(this).parents(".fromto");
+        var $start = $fromto.find("input[data-type='start']");
+        var $end = $fromto.find("input[data-type='end']");
+        var min_date = $start.val() || null;
+        var max_date = $end.val() || null;
+        fcif.f_ignore_datepicker_changed = true;
+        $end[0].picker.set("minDate", min_date);
+        $start[0].picker.set("maxDate", max_date);
+        fcif.f_ignore_datepicker_changed = false;
+    });
+};
+
+fcif.update_datepicker_date = function (input) {
+    var date = input.val();
+    var option = input.parents('.dd_option');
+    option.data(input.data('type'), date);
+    var start = option.data('start') ? option.data('start') : '';
+    var end = option.data('end') ? option.data('end') : '';
+    var custom_type = option.data('customtype');
+    option.data('value', '?' + custom_type + '_' + start + '_' + end);
+};
+
+fcif.deactivate_custom_options = function(group){
+    fcif.f_ignore_datepicker_changed = true;
+    group.find(".dd_option.fromto.active input").each(function(){
+        if ($(this)[0].clearPicker) {
+            // this is datepicker source input (hidden)
+            $(this)[0].clearPicker();
+            fcif.update_datepicker_date($(this));
+        }
+    });
+    fcif.f_ignore_datepicker_changed = false;
+};
+
+fcif.deactivate_saved_search = function() {
+    $(".saved_search_div").removeClass('active');
+    fcif.active_search_id = 0;
+};
+
+fcif.activate_saved_search = function(search_id) {
+    $(".saved_search_div[data-searchid='" + search_id + "']").addClass('active');
+    fcif.active_search_id = search_id;
+};
+
+fcif.on_saved_search_click = function (element) {
+    if (element.hasClass("active")) {
+        fcif.remove_sorting();
+        return;
+    }
+
+    var search_id = element.data('searchid');
+    fcif.apply_stored_search(saved_searches[search_id].conditions, search_id);
+    $(".saved_search_div").removeClass('active');
+    fcif.activate_saved_search(search_id);
+};
+
+fcif.remove_sorting = function (f_clear_default_filters) {
+    f_clear_default_filters = f_clear_default_filters || 0;
+    fcif.last_search_id = 0;
+    fcif.deactivate_custom_options($("#improved_filters"));
+    fcif.deactivate_saved_search();
+    $(".dd_option").removeClass('active');
+    $(".fcif_flag").removeClass('active');
+    $('#bt_search_substr').val('');
+    fcif.apply_filters(0, true, false, f_clear_default_filters);
+};
+
+fcif.on_search_textchange = function (input) {
+    fcif.deactivate_saved_search();
+    $("#fcif_progress").appendTo(".search_substr_div").show();
+    fcif.apply_filters();
+};
+
+fcif.on_dd_group_click = function (group) {
+    var active_options = group.find(".active.dd_option");
+    if (!active_options.length) {
+        return;
+    }
+    fcif.deactivate_custom_options(group);
+    active_options.removeClass('active');
+    fcif.deactivate_saved_search();
+    fcif.apply_filters(0, true);
+};
+
+fcif.on_dd_option_click = function (option, no_update, f_fromto, e, f_manual_ordering) {
+    no_update = no_update || 0;
+    f_fromto = f_fromto || 0;
+    e = e || 0;
+    f_manual_ordering = f_manual_ordering || 0;
+
+    if (!option.length) {
+        return;
+    }
+
+    var activate = f_fromto || !option.hasClass('active');
+    var group = option.parents(".dd_group_containter");
+    var group_title = group.find(".dd_group_title");
+
+    if (group.data('type')==='order') {
+        $("#sort_options .active").removeClass('active');
+    }
+
+    var f_reset_others = false;
+    if (f_fromto) {
+        f_reset_others = true;
+    } else if (e && !e.ctrlKey && !e.metaKey) {
+        fcif.deactivate_custom_options(group);
+    }
+    
+    if (activate) {
+        var value_type = group.data('valuetype');
+        f_reset_others = f_reset_others || value_type==='not_null' || value_type==='interval';
+        if ( (value_type==='date_in' || value_type==='date_passed') && e && !e.ctrlKey && !e.metaKey) {
+            f_reset_others = true;
+        }
+
+        if (f_reset_others) {
+            group.find(".dd_suboptions .active").removeClass('active');
+        }
+        option.addClass('active');
+        group_title.addClass('active');
+    } else {
+        option.removeClass('active');
+        if (!group.find(".dd_suboptions .dd_option.active").length) {
+            group_title.removeClass('active');
+        }
+    }
+    fcif.deactivate_saved_search();
+
+    if (no_update) {
+        return;
+    }
+
+    $("#fcif_progress").appendTo(option).show();
+    fcif.apply_filters(0, false, false, false, f_manual_ordering);
+};
+
+fcif.on_flag_click = function(flag) {
+    flag.toggleClass('active');
+    fcif.apply_filters(0, true, true);
+};
+
+fcif.update_short_descriptions = function (titles) {
+    var MAX_SYMBOLS = 25;
+    var filter_curr_descr = filter_descr;
+    var order_curr_descr = filter_descr;
+
+    if (!jQuery.isEmptyObject(titles.order)) {
+        for (var key in titles.order) {
+            order_curr_descr = key + " " + (titles.order[key] === order_asc_title ? order_asc_title : order_desc_title);
+            break;
+        }
+    }
+    if (!jQuery.isEmptyObject(titles.filter)) {
+        filter_curr_descr=Object.keys(titles.filter).join(", ");
+    }
+    $("#short_descr_filter").html(filter_curr_descr.slice(0, MAX_SYMBOLS));
+    $("#short_descr_order").html(order_curr_descr.slice(0, MAX_SYMBOLS));
+};
+
+fcif.getSelectedConditions = function () {
+    var conditions = {filter:{}, order: {}, substring: ''};
+    var titles = {order:{}, filter:{}};
+
+    var is_default = true;
+    $(".dd_suboptions .dd_option.active").each(function(){
+        var group = $(this).parents(".dd_group_containter");
+        var type = group.data('type');
+        var id = group.data('id');
+        var value = $(this).data('value');
+
+        if ("order" === type) {
+            var order_title = $(this).data('order_title');
+            conditions[type][id] = value;
+            titles[type][group.data('title')] = order_title;
+        } else {
+            if (!conditions[type][id]) {
+                conditions[type][id] = [];
+            }
+            conditions[type][id].push(value);
+            titles[type][group.data('title')] = value;
+        }
+
+        if (!$(this).hasClass('default')) {
+            is_default = false;
+        }
+    });
+
+    var current_options_count = $("#filter_options .dd_suboptions .dd_option.active").length;
+    var default_options_count = $("#filter_options .dd_suboptions .dd_option.default").length;
+    if (current_options_count !== default_options_count) {
+        is_default = false;
+    }
+
+    fcif.update_short_descriptions(titles);
+
+    var substring = $.trim($('#bt_search_substr').val());
+    if (substring.length >= fcif.min_search_substring_length || fc.hasCJKChar(substring)) {
+        is_default = false;
+        conditions['substring'] = substring;
+    }
+
+    $(".fcif_flag.active").each(function(){
+        is_default = false;
+        if (!conditions.flags) {
+            conditions.flags = {};
+        }
+        conditions.flags[$(this).data('id')] = 1;
+    });
+
+    // we do not count selected default order as an applied search
+    if (is_default) {
+        $('.remove_sorting').addClass('hide');
+        $('#save_search_btn').addClass('btn-disabled');
+    } else {
+        $('#save_search_btn').removeClass('btn-disabled');
+        $('.remove_sorting').removeClass('hide');
+    }
+
+    $("#show_all_btn").toggle(is_default);
+
+    return conditions;
+};
+
+fcif.apply_filters = function (search_id, no_delay, disable_instant, f_clear_default_filters, f_manual_ordering, ajax_callback) {
+    search_id = search_id || 0;
+    no_delay = no_delay || 0;
+    disable_instant = disable_instant || 0;
+    f_clear_default_filters = f_clear_default_filters || false;
+    f_manual_ordering = f_manual_ordering || false;
+
+    clearTimeout(fcif.update_timeout_handler);
+
+    if (!$("#sort_options .active").length) {
+        /* if we have an empty order selected, will try to apply default order */
+        fcif.on_dd_option_click($("#sort_options .dd_option.default").first(), true, 0, 0, 0);
+    }
+    if (!f_manual_ordering && !search_id && !$("#filter_options .active").length && !f_clear_default_filters) {
+        fcif.on_dd_option_click($("#filter_options .dd_option.default"), true, 0, 0, 0);
+    }
+
+    var conditions = fcif.getSelectedConditions();
+
+    if (fc.fcif_skip_one_execution) {
+        fcif.applied_string_hash = JSON.stringify(conditions);
+        $(document).trigger('fcif_html_changed', {f_instant: 0});
+        delete fc.fcif_skip_one_execution;
+        fcif.f_cond_inited_from_url = false; // allows to clear the url with conditions next time when filters applied
+        fcif.present_data_conditions = conditions;
+        fcif.conditions_for_outer_data_fetch = conditions;
+        if (search_data.description) {
+            $("#current_search_desc").text(search_data.description);
+        }
+        if ($("#saved_searches_container").length) {
+            $("#saved_searches_container").removeClass('hide');
+        }
+        return;
+    }
+
+    if (search_data.conditions.f_from_url) {
+        conditions.f_from_url = true;
+    }
+
+    // clearing the url with conditions if needed and if allowed
+    if (fcif.get_conditions_from_url() && !fcif.f_cond_inited_from_url) {
+        var url_to_app = url_to_application;
+        if (url_to_app === 'dashboard/todos') {
+            url_to_app = 'dashboard/tasks';
+        }
+        history.pushState({}, '', base_url + url_to_app);
+        // remove filters from xls download urls
+        $(".xls_link").each(function() {
+            var current_href = $(this).attr("href");
+            if (current_href.indexOf("?f_fiu=1&") !== -1) {
+                $(this).attr("href", current_href.substring(0, current_href.indexOf("?f_fiu=1&")));
+            }
+        })
+    }
+
+    var f_instant = fcif.isInstantFilter(conditions, disable_instant) ? 1 : 0;
+    if (f_instant) {
+        fcif.applyInstantFilter(conditions);
+    }
+
+    if (fcif.applied_string_hash === JSON.stringify(conditions)) {
+        return;
+    }
+
+    if (!no_delay) {
+        fcif.update_timeout_handler = setTimeout(function(){fcif.apply_filters(search_id, true);}, fcif.APPLY_FILTERS_DELAY_MS);
+        if (!f_instant) {
+            $("#fcif_progress").stop().width("100%").animate({width: 0}, fcif.APPLY_FILTERS_DELAY_MS, function(){$(this).hide();});
+        }
+        return;
+    }
+
+    var app_params = {};
+    if (typeof fcif_app_params === "function") {
+        app_params = fcif_app_params();
+    }
+
+    if (typeof triggerApplyFilter === "function") {
+        // called from new calendar
+        triggerApplyFilter({
+            f_instant: f_instant,
+            app_params: app_params,
+            conditions: conditions,
+            search_id: search_id
+        });
+        fcif.conditions_for_outer_data_fetch = conditions;
+        return;
+    }
+
+    ajaxRequest(
+        base_url + url_to_application + '/apply_filters',
+        {conditions: conditions, search_id: search_id, app_params: app_params, f_instant: f_instant},
+        function(response) {
+            if (typeof fcif_before_replace_hook === "function") {
+                fcif_before_replace_hook({f_instant: f_instant});
+            }
+
+            var data = response.data;
+
+            if (!f_instant) {
+                $('#content').html(data.html);
+            }
+
+            fcif.update_page_after_filters_applied(data.search_data, conditions, f_instant);
+
+            delete search_data.conditions.f_from_url;
+            fcif.f_cond_inited_from_url = false; // allows to clear the url with conditions next time when filters applied 
+
+            if (fcif.update_success_message) {
+                $.flash_action(fcif.update_success_message, fcif.warn_msg ? 10000 : 2000, fcif.warn_msg ? 'warn' : '');
+                fcif.update_success_message = null;
+                fcif.warn_msg = false;
+            }
+            if (fc.improved_actions_exist && !f_instant) {
+                fc.clear_toggle_all();
+                $('.fcif_item input').kalypto();
+                fc.update_action_buttons();
+            }
+            if ($(".dragHandle").length) {
+                // todo - this is BT-specific, move out of here. check other app-specific cases
+                $.dragAndDrop();
+            }
+
+            if (fc.improved_actions_exist && fc.batch_applied_ids.length) {
+                var elements_to_highlight = $();
+                for (var i=0; i < fc.batch_applied_ids.length; i++) {
+                    var id = fc.batch_applied_ids[i];
+                    $("#entity_chk_" + id).prop("checked", true).change();
+                    elements_to_highlight = elements_to_highlight.add($("#" + id));
+                }
+                fc.batch_applied_ids = [];
+                fc.highlight_elements(elements_to_highlight);
+            }
+
+            fc.process_url_hash();
+            fkit.initiatePlugins();
+
+            if (typeof ajax_callback === "function") {
+                ajax_callback();
+            }
+        }
+    );
+};
+
+fcif.update_page_after_filters_applied = function(search_data, conditions, f_instant) {
+    // if conditions are empty, this is an outer handler for the data fetch
+    conditions = conditions || fcif.conditions_for_outer_data_fetch;
+
+    f_instant = f_instant ? true : false;
+    $(document).trigger('fcif_html_changed', {f_instant: f_instant});
+    if (!f_instant) {
+        fcif.present_data_conditions = conditions;
+    }
+
+    $("#current_search_desc").text(search_data.description);
+    fcif.applied_string_hash = JSON.stringify(conditions);
+    
+    // storing to a local storage
+    delete search_data.description; // no need to keep in the local storage
+    if (!search_data.conditions.f_from_url) {
+        store.set(fcif.active_search_unique_id, search_data);
+        if (fc.fcif_milestones) {
+            store.set(fcif.additional_active_search_unique_id, search_data);
+        }
+    }
+    
+    $('.timeago').timeago();
+    $("#saved_searches_container, #content, #improved_actions_header").removeClass('hide');
+};
+
+fcif.reapply_filters = function () {
+    fcif.applied_string_hash = '';
+    fcif.apply_filters(0, true);
+};
+
+fcif.on_save_search_insert_or_replace = function (data) {
+    for (var key in data) {
+        var replace = typeof saved_searches[key] !== 'undefined';
+        saved_searches[key] = data[key];
+        fcif.add_saved_search_line(data[key], true, replace);
+        fcif.last_search_id = key;
+    }
+    if ($(".kanban_saved_searches").length) {
+        fc.highlight_elements($(".kanban_saved_searches"));
+    }
+};
+
+fcif.add_saved_search_line = function (data, make_active, f_replace) {
+    f_replace = f_replace || false;
+    var search = $(".saved_search_div.template").clone(true);
+    search.removeClass('template').removeClass('hide');
+    search.attr("data-searchid", data.id);
+    search.find(".delete_saved_search")
+            .attr("data-tip", data.f_public ? "Delete public saved search" : "Delete private saved search")
+            .jTip({attr:"data-tip", y_coordinate:20, tip_class:"jtip_standard"});
+
+    search.find(".saved_search").text(data.title).attr('title', data.title);
+
+    if(f_replace) {
+        $("#saved_searches [data-searchid='" + data.id + "']").replaceWith(search);
+    } else {
+        $("#saved_searches").append(search);
+    }
+
+    if (make_active || 0) {
+         $(".saved_search_div").removeClass('active');
+         fcif.activate_saved_search(data.id);
+    }
+    $("#saved_searches").removeClass('hide');
+};
+
+function on_search_save(server_response) {
+    var data = server_response.data;
+    if(data.permission_error) {
+        show_permissions_error();
+        return;
+    }
+    if (!data.action) {
+        fcif.on_save_search_insert_or_replace(data);
+        fkit.modal_opened.fkit_modal_close();
+        return;
+    } else {
+        fc.registerError("on_search_save() - action is passed: " + JSON.stringify(server_response.data), '', true, 'error');
+    }
+
+    fcif.reapply_filters();
+    fkit.modal_opened.fkit_modal_close();
+};
+
+
+function fcif_delete_saved_search(delete_btn) {
+    var search_div = delete_btn.parents(".saved_search_div");
+    var url_prefix = 'manage/' + group_unique_name + '/' + project_unique_name + '/saved_searches';
+    if (typeof todos_page !== 'undefined' && todos_page.f_global) {
+        url_prefix = 'manage/saved_searches';
+    }
+    var url = base_url + url_prefix + '/delete_s_search';
+    var search_id = search_div.data("searchid");
+    ajaxRequest(
+        url,
+        {search_id: search_id},
+        function() {
+            search_div.remove();
+            if (!$(".saved_search_div").not(".template, .saved_searches_title").length) {
+                $("#saved_searches").addClass('hide');
+            }
+            if(fcif.last_search_id == search_id) {
+                fcif.last_search_id = 0;
+            }
+            if(fcif.active_search_id == search_id) {
+                fcif.active_search_id = 0;
+            }
+            delete saved_searches[search_id];
+        }
+    );
+};
+
+fcif.apply_stored_custom_filter = function(value, option) {
+    var FROMTO_FILTER_VALUE_PREFIX = "?fromto";
+    var chunks = value.split("_");
+    if (FROMTO_FILTER_VALUE_PREFIX === chunks[0]) {
+        if (chunks[1]) {
+            var input = option.find("input[data-type='start']");
+            input.val(chunks[1]);
+            fcif.update_datepicker_date(input);
+            if (input[0].picker) {
+                // picker was inited before - so updating
+                input[0].picker.setDate(input.val());
+            }
+        }
+        if (chunks[2]) {
+            var input = option.find("input[data-type='end']");
+            input.val(chunks[2]);
+            fcif.update_datepicker_date(input);
+            if (input[0].picker) {
+                // picker was inited before - so updating
+                input[0].picker.setDate(input.val());
+            }
+        }
+    }
+};
+
+fcif.apply_stored_search = function (conditions, search_id) {
+    var MAX_STANDARD_FILTERS_VALUE = 2;
+    conditions = conditions || {};
+    fcif.substring_used = false;
+    fcif.last_search_id = search_id;
+    $("#improved_filters .dd_option").removeClass('active');
+    $("#improved_filters .fcif_flag").removeClass('active');
+    $('#bt_search_substr').val('');
+    for (var type_key in conditions) {
+        if (type_key==='substring') {
+            if (conditions[type_key]) {
+                $("#bt_search_substr").val(conditions[type_key]);
+                fcif.substring_used = true;
+            }
+            continue;
+        }
+
+        for (var group_key in conditions[type_key]) {
+            var group_key_escaped = group_key.replace('.', '\\.');
+            if (type_key==='order') {
+                var option = $("#"+type_key+"_"+group_key_escaped+"_"+conditions[type_key][group_key]);
+                option.addClass("active");
+                option.parents(".dd_group_containter").find(".dd_group_title").addClass("active");
+                continue;
+            } else if (type_key === 'flags') {
+                for (var key_2 in conditions[type_key]) {
+                    if (conditions[type_key][key_2] == 1) {
+                        $("#flags_" + key_2).addClass('active');
+                    }
+                }
+                continue;
+            }
+            for (var key in conditions[type_key][group_key]) {
+                var custom_value = false;
+                if (type_key==='description') {
+                    continue;
+                }
+                var value = conditions[type_key][group_key][key];
+                if ('?' === String(value).charAt(0)) {
+                    custom_value = value;
+                    value = 'custom';
+                }
+                
+                if(group_key != 'project_group') { // Probably need to include other keys too (except user keys), as project_group ID can be same as userid, resulting in 'value' being overriden when it shouldn't
+                    if (userid > MAX_STANDARD_FILTERS_VALUE && parseInt(value, 10) == userid) {
+                        // foreign public search with curr user id
+                        value = fc.curr_user_id_substitute;
+                    }
+                }
+
+                var option = $("#"+type_key+"_"+group_key_escaped+"_"+value);
+                if (custom_value) {
+                    fcif.apply_stored_custom_filter(custom_value, option);
+                }
+                option.addClass("active");
+                option.parents(".dd_group_containter").find(".dd_group_title").addClass("active");
+            }
+        }
+    }
+
+    fcif.applied_string_hash = '';
+    fcif.apply_filters(search_id, true);
+    return true;
+};
+
+fc.batch_delete_callback = function (data) {
+    fcif.applied_string_hash = '';
+    fcif.apply_filters(0, true, true); // should be implemented w/o forced data reloading
+    fcif.update_success_message = data.message ? data.message : "Successfully deleted selected entries!";
+    fcif.warn_msg = data.message ? true : false;
+};
+
+fc.batch_update_callback = function (data) {
+    fcif.applied_string_hash = '';
+    fcif.apply_filters(0, true, true); // should be implemented w/o forced data reloading
+    fcif.update_success_message = data.message ? data.message : "Successfully updated selected entries!";
+    fcif.warn_msg = data.message ? true : false;
+};
+
+fcif.isInstantFilter = function(conditions, disable_instant) {
+    if (typeof todos_page !== "undefined" && $(".todo_wrapper.subtask").length) {
+        // temp solution to not apply instant filters in Tasks on client when there are subtasks
+        return false;
+    }
+
+    if (fc.f_paginated) {
+        return false;
+    }
+
+    if (disable_instant || !fc.fcif_instant_filters) {
+        return false;
+    }
+
+    var current = fcif.present_data_conditions;
+
+    if (JSON.stringify(conditions.order) !== JSON.stringify(current.order)
+            || $.trim(conditions.substring) !== $.trim(current.substring)
+            || JSON.stringify(conditions.flags) !== JSON.stringify(current.flags) ) {
+        return false;
+    }
+
+    var old_filter = current.filter;
+    var new_filter = conditions.filter;
+
+    if (Object.keys(new_filter).length < Object.keys(old_filter).length) {
+        // console.log("less filters count than before");
+        return false;
+    }
+
+    for (var key in old_filter) {
+        if (!new_filter[key]) {
+            // console.log("old filter absent in new search");
+            return false;
+        }
+
+        if (new_filter[key].length > old_filter[key].length) {
+            // console.log("new filter has more options selected");
+            return false;
+        }
+
+        if (!fc.fcif_instant_filters[key]
+                && JSON.stringify(new_filter[key]) !== JSON.stringify(old_filter[key])) {
+            // console.log("changes inside non instant-ready filter");
+            return false;
+        }
+
+        for (var i=0; i<new_filter[key].length; i++) {
+            if (!($.inArray(new_filter[key][i], old_filter[key])+1)) {
+                // console.log("new filter has options which were not selected before");
+                return false;
+            }
+        }
+    }
+
+    for (var key in new_filter) {
+        if (!fc.fcif_instant_filters[key] && !old_filter[key]) {
+            // console.log("non instant-ready filter added");
+            return false;
+        }
+    }
+    return true;
+};
+
+fcif.isIntersecting = function(item_data_arr, filter_data) {
+    for (var i=0; i < item_data_arr.length; i++) {
+        if ($.inArray(item_data_arr[i], filter_data)+1) {
+            // console.log("children comply with filters");
+            return true;
+        }
+    }
+    // console.log("children does not comply with filters");
+    return false;
+};
+
+fcif.isComplyingFilters = function(item_data, filters) {
+    for (var filter_id in filters) {
+        if (typeof item_data[filter_id] === "undefined") {
+            // folders does not have all the properties files have
+            return fcif.ignore_absent_property;
+        }
+        if (!($.inArray(item_data[filter_id], filters[filter_id])+1)) {
+            if (!item_data[filter_id + "_arr"] || !fcif.isIntersecting(item_data[filter_id + "_arr"], filters[filter_id])) {
+                return false;
+            }
+        }
+    }
+    return true;
+};
+
+fcif.getAppliedInstantFilters = function(conditions) {
+    var filters = jQuery.extend(true, {}, conditions.filter);
+    for (var key in filters) {
+        if (!fc.fcif_instant_filters[key]) {
+            delete filters[key];
+            continue;
+        }
+        for (var i=0; i < filters[key].length; i++) {
+            if (filters[key][i] === fc.curr_user_id_substitute) {
+                filters[key][i] = userid;
+            }
+        }
+    }
+    return filters;
+};
+
+fcif.showNothingFoundIfNeeded = function(shown_count) {
+    if (!fc.fcif_show_no_entries) {
+        return;
+    }
+    if (shown_count) {
+        $(".no_entries.instant").remove();
+        return;
+    }
+    if ($(".no_entries:visible").length) {
+        return;
+    }
+    var div = $("<div class='no_entries instant'>No results found. Please update your search and try again.</div>");
+    $('#content').append(div);
+};
+
+fcif.applyInstantFilter = function(conditions) {
+    if (fcif.applied_instant_hash === JSON.stringify(conditions)) {
+        return;
+    }
+
+    fcif.applied_instant_hash = JSON.stringify(conditions);
+
+    var filters = fcif.getAppliedInstantFilters(conditions);
+
+    var shown_count = 0;
+    for (var i=0; i < entities_data.length; i++) {
+        var shown = fcif.isComplyingFilters(entities_data[i], filters);
+        if (shown) {
+            shown_count++;
+        }
+        $("#" + fc.fcif_itemid_prefix + entities_data[i]['id']).toggle(shown).toggleClass("fcif_shown", shown);
+    }
+
+    if (fc.improved_actions_exist) {
+        fc.ia_uncheck_all();
+    }
+    fcif.showNothingFoundIfNeeded(shown_count);
+    $(document).trigger('fcif_instant_filter_applied');
+};
+
+fcif.copyUrlWithFilters = function () {
+    var conditions = fcif.getSelectedConditions();
+    var url_to_app = url_to_application;
+    if (url_to_app === 'dashboard/todos') {
+        url_to_app = 'dashboard/tasks';
+    }
+    // f_fiu means f_filters_in_url
+    var url = base_url + url_to_app + "?f_fiu=1&" + $.param(conditions);
+    var buffer_el = $("#url_filtered");
+    buffer_el.val(url);
+    fc.execCopyCommand(buffer_el, url_copied, url_select_and_copy + "<br/><br/>" + buffer_el.val(), 1000, 1000);
+    fc.logEvent("filters_in_url", "copied");
+}
+
+fcif.apply_filters_and_clear_url = function () {
+    if (fcif.get_conditions_from_url()) {
+        fcif.applied_string_hash = '';
+        fcif.apply_filters(0, true, true);
+    }
+}

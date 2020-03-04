@@ -1,0 +1,223 @@
+/**!
+* Google Drive File Picker Example
+* By Daniel Lo Nigro (http://dan.cx/)
+*/
+    /**
+    * Initialise a Google Driver file picker
+    */
+    var FilePicker = window.FilePicker = function(container) {
+        // Config
+        this.apiKey = filepicker_api_key;
+        this.clientId = filepicker_client_id;
+        this.authuser = 0;
+
+        if (!container.length) {
+            return;
+        }
+
+        var google_link = container.find(".upload_drive_link");
+        if (!google_link.length) {
+            return;
+        }
+
+        this.buttonEl = google_link[0];
+
+        // additional parameters stored inside the block
+        this.app_id = container.data('appid');
+        this.item_id = container.data('itemid');
+        this.temporaryFlag = container.data('temp');
+        this.comment_id = container.data('commentid');
+        this.ids_element = container.find('.fc_upload_ids');
+        this.enableMulti = container.data('no_multi') ? false : true;
+
+        this.fileFirstVersion = container.data('firstversion');
+
+        this.buttonEl.addEventListener('click', this.open.bind(this));
+
+        // Disable the button until the API loads, as it won't work properly until then.
+        this.buttonEl.disabled = true;
+
+        var picker = this;
+
+        // Events
+        this.onSelect = function(url, file) {
+            var accessToken = gapi.auth.getToken().access_token;
+
+            var mime = file['mimeType'];
+            var download_url = file['downloadUrl'];
+            if (file['mimeType'] == 'application/vnd.google-apps.drawing') {
+                download_url = file['exportLinks']['image/jpeg'];
+                mime = 'image/jpeg';
+            }
+
+            var params = {};
+            params['application_id'] = picker.app_id;
+            params['item_id'] = picker.item_id;
+            params['comment_id'] = picker.comment_id;
+            params['token'] = accessToken;
+            params['temporary'] = picker.temporaryFlag;
+            params['fversion_id'] = picker.fileFirstVersion;
+            params['gdrive_file'] = {};
+            params['gdrive_file']['title'] = file['title'];
+            params['gdrive_file']['url'] = url;
+            params['gdrive_file']['downloadUrl'] = download_url;
+            params['gdrive_file']['mimeType'] = mime;
+
+            var temp_file_id = "g_" + Math.round((Math.random()*1000));
+            var file_info = {'id': temp_file_id, 'name': file['title'], ext_type: 'google', start: true};
+            $(picker.buttonEl).parents(".fc_upload_block").fcUpload('external_file', file_info);
+
+            var url = getCurrentUploadFileUrl() + '/google_drive_module/add/';
+            ajaxRequest(url, params, function(response){
+                response.data.temp_id = temp_file_id;
+                response.data.start = false;
+                $(picker.buttonEl).parents(".fc_upload_block").fcUpload('external_file', response.data);
+            });
+        };
+
+        $(document).off("click", "#gdrive_account_switcher");
+        $(document).on("click", "#gdrive_account_switcher", function(e){
+            e.preventDefault();
+            var accessToken = gapi.auth.getToken().access_token;
+            $.ajax({
+                url: "https://accounts.google.com/o/oauth2/revoke?token="+accessToken,
+                dataType: 'jsonp', // Notice! JSONP <-- P (lowercase)
+                success:function(json){
+                    $('div.picker[role="dialog"]').fadeOut(400, function(){
+                        $(this).detach();
+                        $('div.picker.modal-dialog-bg.picker-dialog-bg').remove();
+                        $('iframe.picker.modal-dialog-bg').remove();
+                    });
+                },
+                error:function(){
+                    //console.log("Error");
+                }
+           });
+
+           gapi.auth.setToken(null);
+           delete picker.picker;
+           picker.authuser = -1;
+           picker._doAuth(false, function() { picker._showPicker(); });
+        });
+
+        // Load the drive API
+        gapi.client.setApiKey(this.apiKey);
+        gapi.client.load('drive', 'v2');//, this._driveApiLoaded.bind(this)
+        if (typeof google === "undefined" && fc.alert_js_errors) {
+            console.log("No google object");
+        }
+        google.load('picker', '1', { callback: this._pickerApiLoaded.bind(this) });
+    };
+ 
+    FilePicker.prototype = {
+        /**
+        * Open the file picker.
+        */
+        open: function() {
+            // Check if the user has already authenticated
+            var token = gapi.auth.getToken();
+            if (token) {
+                this._showPicker();
+            } else {
+                // The user has not yet authenticated with Google
+                // We need to do the authentication before displaying the Drive picker.
+                this._doAuth(false, function() { this._showPicker(); }.bind(this));
+            }
+        },
+        /**
+        * Show the file picker once authentication has been done.
+        * @private
+        */
+        _showPicker: function() {
+            if(typeof this.picker === 'object') {
+                this.picker.setVisible(true);
+                return;
+            }
+            var accessToken = (gapi.auth.getToken() ? gapi.auth.getToken().access_token : null);
+            if(accessToken === null) {
+                return;
+            }
+
+            let picker_view = new google.picker.DocsView();
+            picker_view.setIncludeFolders(true);
+            this.picker = new google.picker.PickerBuilder().
+            addViewGroup(
+                        new google.picker.ViewGroup(picker_view).
+                            addView(google.picker.ViewId.DOCS_IMAGES).
+                            addView(google.picker.ViewId.DOCUMENTS).
+                            addView(google.picker.ViewId.PRESENTATIONS).
+                            addView(google.picker.ViewId.SPREADSHEETS).
+                            addView(google.picker.ViewId.PDFS)).
+            enableFeature(this.enableMulti ? google.picker.Feature.MULTISELECT_ENABLED : google.picker.Feature.SIMPLE_UPLOAD_ENABLED).
+            setAppId(this.clientId).
+            setOrigin(window.location.protocol + '//' + window.location.host).
+            setOAuthToken(accessToken).
+            setCallback(this._pickerCallback.bind(this)).
+            build();
+            this.picker.setVisible(true);
+
+            gapi.client.load('oauth2', 'v2', function() {
+                gapi.client.oauth2.userinfo.get().execute(function(resp) {
+                    var email = resp.email;
+                    $('div.picker[role="dialog"]').prepend('<div class="gdrive_account_cntr"><span class="title">' + you_signed_as_str + '</span> <span class="email">' + email + '</span><br/>  <a href="#" id="gdrive_account_switcher">' + sign_out_google_str + '</a></div>');
+                });
+            });
+        },
+        /**
+        * Called when a file has been selected in the Google Drive file picker.
+        * @private
+        */
+        _pickerCallback: function(data) {
+            if (data[google.picker.Response.ACTION] == google.picker.Action.PICKED) {
+                const fcpicker = this;
+                for (let i=0; i < data[google.picker.Response.DOCUMENTS].length; i++) {
+                    let file = data[google.picker.Response.DOCUMENTS][i];
+                    const url = file[google.picker.Document.URL];
+
+                    /* to get full file info we can request it there */
+                    let id = file[google.picker.Document.ID];
+                    setTimeout(function() {
+                        request = gapi.client.drive.files.get({
+                            fileId: id
+                        });
+                        request.execute(fcpicker._fileGetCallback.bind(fcpicker, url));
+                    }, i*100);
+                }
+            }
+        },
+        /**
+        * Called when file details have been retrieved from Google Drive.
+        * @private
+        */
+        _fileGetCallback: function(file, url) {
+            if (this.onSelect) {
+                this.onSelect(file, url);
+            }
+        },
+        /**
+        * Called when the Google Drive file picker API has finished loading.
+        * @private
+        */
+        _pickerApiLoaded: function() {
+            this.buttonEl.disabled = false;
+        },
+        /**
+        * Called when the Google Drive API has finished loading.
+        * @private
+        */
+        /*_driveApiLoaded: function() {
+            this._doAuth(true);
+        },*/
+        /**
+        * Authenticate with Google Drive via the Google JavaScript API.
+        * @private
+        */
+        _doAuth: function(immediate, callback) {
+            gapi.auth.authorize({
+                    client_id: this.clientId,
+                    scope: ['https://www.googleapis.com/auth/drive.readonly','openid','email'],
+                    immediate: immediate,
+                    authuser: this.authuser
+            }, callback);
+        }
+    };

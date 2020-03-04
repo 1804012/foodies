@@ -1,0 +1,75 @@
+/**
+ *
+ */
+$(function(){
+    $.fn.timeEntry = function() {
+
+        return this.each(function() {
+            // object is the selected pagination element list
+            var $th = $(this);
+
+            $th.on("blur", function(){
+                var newTime = calculateTime($th);              
+                if ($th.val().length) {//to prevent filling empty fiels as it has placeholder
+                    $th.val(newTime.formatted);
+                }
+                if ($th.data("time-field")) {
+                    $($th.data("time-field")).val(newTime.minutes);
+                }
+            });
+
+            // Initiate
+            if ($th.val().length) {//to prevent filling empty fiels as it has placeholder
+                $th.val(calculateMinutes($th));
+            }
+
+            function calculateMinutes($th) {
+                var hours = 0;
+                var minutes = $($th.data("time-field")).val();
+
+                hours = Math.floor(minutes / 60);
+                minutes -= hours * 60;
+
+                return format_time(hours, minutes);
+            }
+        });
+    };
+});
+
+function format_time(hours, minutes) {
+    if (hours < 10) {
+        hours = "0" + hours;
+    }
+    if (minutes < 10) {
+        minutes = "0" + minutes;
+    }
+    return hours + ':' + minutes;
+}
+
+function calculateTime($th) {
+    var val = $th.val();
+    var valArr = val.split(":");
+
+    // Lets parse
+    var fullMinutes = 0;
+    var hours = (isNaN(parseInt(valArr[0])) ? 0 : parseInt(valArr[0]));
+    var minutes = (isNaN(parseInt(valArr[1])) ? 0 : parseInt(valArr[1]));
+
+    // Clean negatives
+    hours = Math.abs(hours);
+    minutes = Math.abs(minutes);
+
+    if (minutes > 59) {
+        var tempHours = Math.floor(minutes / 60);
+        minutes -= tempHours * 60;
+        hours += tempHours;
+    }
+
+    fullMinutes += hours * 60;
+    fullMinutes += minutes;
+
+    return {
+        formatted: format_time(hours, minutes),
+        minutes: fullMinutes
+    };
+}

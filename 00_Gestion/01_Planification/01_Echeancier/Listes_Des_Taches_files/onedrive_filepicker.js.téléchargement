@@ -1,0 +1,57 @@
+(function(jQuery) {
+    
+    $(document).off("click", ".upload_onedrive_link");
+    $(document).on("click", ".upload_onedrive_link", function() {
+        var block = $(this).parents('.fc_upload_block');
+        var multiSelect = block.data('no_multi') ? false : true;
+        var odOptions = {
+            clientId: onedrive_app_id,
+            action: onedrive_action,
+            multiSelect: multiSelect,
+            openInNewWindow: true,
+            advanced: {
+                redirectUri: base_url + 'onedrive.html',
+            },
+            success: function (files) {
+                $.each(files.value, function(key, file) {
+                    var shareLink = file.permissions[0]['link']['webUrl'];
+                    var downloadUrl = '';
+                    if(file.thumbnails.length > 0) {
+                        downloadUrl = file.thumbnails[0]['large']['url'];
+                    }
+                    
+                    var params = {};
+                    params['application_id'] = block.data('appid');
+                    params['item_id'] = block.data('itemid');
+                    params['comment_id'] = block.data('commentid');
+                    params['temporary'] = block.data('temp');
+                    params['fversion_id'] = block.data('firstversion');
+                    
+                    params['onedrive_file'] = {};
+                    params['onedrive_file']['title'] = file['name'];
+                    params['onedrive_file']['url'] = shareLink;
+                    params['onedrive_file']['downloadUrl'] = downloadUrl;
+                    params['onedrive_file']['size'] = file['size'];
+
+                    var temp_file_id = 'o_' + Math.round((Math.random() * 1000));
+                    var file_info = {
+                        'id': temp_file_id,
+                        'name': file['name'],
+                        ext_type: 'onedrive',
+                        start: true,
+                        size: file['size']
+                    };
+                    block.fcUpload('external_file', file_info);
+
+                    var url = getCurrentUploadFileUrl() + '/onedrive_module/add/';
+                    ajaxRequest(url, params, function (response) {
+                        response.data.temp_id = temp_file_id;
+                        response.data.start = false;
+                        block.fcUpload('external_file', response.data);
+                    });
+                })
+            }
+        };
+        OneDrive.open(odOptions);
+    })
+})($);

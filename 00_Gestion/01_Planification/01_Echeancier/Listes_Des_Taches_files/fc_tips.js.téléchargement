@@ -1,0 +1,293 @@
+var fc_tips = {};
+fc_tips.fix_markers_position = false;
+/*
+ * This if fix for tip_boxes offset and size to be able
+ * restore it after resize from mobile view to wider screen
+ * See .user_tip_box class in stylesheet
+ */
+fc_tips.default_left = 45;
+fc_tips.default_width = 380;
+fc_tips.no_element_tips = [];
+
+$(function(){
+    if (fc.isMobileVersion) {
+        $(".fc-user-actions li.tips").remove();
+        return;
+    }
+
+    setTimeout(function(){fc_tips.initUserTips();}, 2000);
+
+	$(window).resize(function() {
+        clearTimeout(fc_tips.fix_markers_position);
+        fc_tips.fix_markers_position = setTimeout(function() {
+            fc_tips.move_tips_after_resize(fc.user_tips);
+            fc_tips.close_opened_tips();
+                $(".user_tip_box").css("left", fc_tips.default_left)
+                                    .css("width", fc_tips.default_width);
+        }, 100);
+	});
+
+    $(".show_tips_group").click(function(){
+        fc_tips.enable_tips_group($(this).data("group"));
+        return false;
+    });
+});
+
+fc_tips.initUserTips = function() {
+    fc_tips.prepare_user_tips(fc.user_tips);
+
+    $(document).on("click", ".user_tip_marker", function(e){
+        fc_tips.handle_click($(this));
+    });
+    $(document).on("click", ".close_tip, .got_it_link", function(e){
+        fc_tips.disable_tip($(this).parents('.user_tip_block, .news_line'));
+        return false;
+    });
+    $(document).on("click", ".got_group_link", function(e){
+        fc_tips.disable_tips_group($(this).parents('.user_tip_block').data('group'));
+        return false;
+    });
+
+    $(".user_tip_block:not('.tip_template') .user_tip_marker").first().click();
+};
+
+fc_tips.create_not_created_tips = function() {
+    var temp_tips = fc_tips.no_element_tips;
+    fc_tips.no_element_tips = [];
+    var created_tips = $();
+    for (var i=0; i < temp_tips.length; i++) {
+        var tip = fc_tips.create_tip(fc.user_tips[temp_tips[i]]);
+        if (tip) {
+            created_tips = created_tips.add(tip);
+        }
+    }
+    return created_tips;
+};
+
+fc_tips.destroy_invisible = function() {
+    fc_tips.move_tips_after_resize(fc.user_tips);
+};
+
+fc_tips.prepare_user_tips = function(tips) {
+    if (!tips) {
+        return;
+    }
+
+    for (var key in tips) {
+        fc_tips.create_tip(tips[key]);
+    }
+};
+
+fc_tips.create_tip = function(data) {
+    var tip_template = $('.tip_template');
+    if (!tip_template.length) {
+        return false;
+    }
+    var element = $(data.selector);
+    if (!element.length || !element.is(":visible")) {
+        fc_tips.no_element_tips[fc_tips.no_element_tips.length] = data.id;
+        return false;
+    }
+
+    var position = fc_tips.get_tip_position(data, element);
+
+    var new_tip = tip_template.clone();
+    new_tip.find('.main_text').html(data.descr);
+    new_tip.find('.header_text').text(data.title);
+    new_tip.removeClass('tip_template')
+           .css(position)
+           .attr('id', 'tip_'+data.id)
+           .data('tipid', data.id)
+           .data('unique_name', data.unique_name)
+           .attr('data-group', data.tips_group)
+           .show();
+
+    if (intval(data.f_news)) {
+        new_tip.find('.got_group_link').remove();
+    }
+
+    $('body').append(new_tip);
+    return new_tip;
+};
+
+
+fc_tips.get_tip_position = function(tip_data, element) {
+    var element_position = element.offset();
+    var position = {
+                        left: element_position.left + parseInt(tip_data.leftpx) + 4,
+                        top: element_position.top + parseInt(tip_data.toppx) + 14
+                    };
+    return position;
+};
+
+fc_tips.move_tips_after_resize = function(tips) {
+    if (!tips) {
+        return;
+    }
+
+    for (var key in tips) {
+        fc_tips.set_tip_position(tips[key]);
+    }
+};
+
+fc_tips.set_tip_position = function(data) {
+    var tip_block = $("#tip_"+data.id);
+    if (!tip_block.length) {
+        return;
+    }
+
+    var element = $(data.selector);
+    if (!element.length || !element.is(":visible")) {
+        tip_block.remove();
+        fc_tips.no_element_tips[fc_tips.no_element_tips.length] = data.id;
+        return;
+    }
+
+    var position = fc_tips.get_tip_position(data, element);
+
+    tip_block.css(position);
+};
+
+fc_tips.handle_click = function(marker) {
+    var tip_block = marker.parents(".user_tip_block");
+    var tip_id = tip_block.data('tipid');
+    var tip_box = tip_block.find(".user_tip_box");
+
+    if (marker.hasClass("opened")) {
+        fc_tips.fade_out_tip_text(tip_id);
+        return;
+    }
+
+    var position = marker.offset();
+    position.top = position.top - 11;
+    position.left = position.left + marker.width() + 20;
+    var tipbox_right = $(window).width() - position.left - fc_tips.default_width;
+    if (tipbox_right < 0 ) {
+        position.left = position.left - fc_tips.default_width - marker.width() - 80;
+        if (position.left >= 0) {
+            tip_box.addClass("right").css("left", "auto");
+        } else {
+            tip_box.addClass("mobile");
+            var page_width = $(window).width();
+            var new_width = page_width*0.96;
+            var new_left = - marker.offset().left + (page_width - new_width)/2;
+            tip_box.css("left", new_left).css("width", new_width);
+        }
+    }
+
+    fc_tips.close_opened_tips();
+
+    marker.addClass("opened");
+    fc_tips.show_tip_text(tip_box);
+};
+
+fc_tips.close_opened_tips = function() {
+    var opened = $(".user_tip_marker.opened").parents(".user_tip_block");
+    opened.each(function(){
+        fc_tips.fade_out_tip_text($(this).data("tipid"));
+    });
+};
+
+// These two actions moved to separate functions for the case if we want use some effects
+fc_tips.show_tip_text = function(tip_box) {
+    tip_box.fadeIn();
+};
+
+fc_tips.fade_out_tip_text = function(id) {
+    $("#tip_" + id).find(".user_tip_box").fadeOut(
+                                            function() {
+                                                $(this).removeClass("mobile right");
+                                            }
+                                        );
+    $("#tip_" + id).find(".user_tip_marker").removeClass("opened");
+};
+
+fc_tips.remove_tip = function(tip_block, f_open_next, f_delete) {
+    f_open_next = f_open_next || false;
+    f_delete = f_delete || false;
+    setTimeout(function(){
+        tip_block.fadeOut(300 + Math.random()*300, function(){
+            if (f_delete) {
+                delete fc.user_tips[tip_block.data('tipid')];
+            }
+            $(this).remove();
+        });
+        if (f_open_next) {
+            setTimeout(function(){
+                $(".user_tip_block:not('.tip_template') .user_tip_marker").first().click();
+            },600);
+        }
+    }, Math.random()*400);
+};
+
+fc_tips.remove_tips_group = function(group, f_delete) {
+    f_delete = f_delete || 0;
+    $(".user_tip_block[data-group='"+group+"']").each(function(){
+        fc_tips.remove_tip($(this, false, f_delete));
+    });
+};
+
+fc_tips.disable_tips_group = function(group) {
+    fc_tips.remove_tips_group(group, true);
+    if(fc_tips.f_disable_ajax) {
+        return;
+    }
+    ajaxRequest(base_url+"tips/hide/" + group);
+};
+
+fc_tips.disable_tip = function(tip) {
+    fc_tips.remove_tip(tip, true, true);
+    if(fc_tips.f_disable_ajax) {
+        return;
+    }
+    var group = tip.data('group');
+    var id = tip.data('tipid');
+    ajaxRequest(base_url+"tips/hide/" + group + "/" + id);
+};
+
+fc_tips.enable_tips_group = function(tips_group) {
+    if(fc_tips.f_disable_ajax) {
+        return;
+    }
+    ajaxRequest(base_url+"tips/show/" + tips_group,
+        {},
+        function (data) {
+            if (!data.data.tips) {
+                return;
+            }
+            fc_tips.remove_tips_group(tips_group);
+            // to let old tips be removed
+            fc.toggleUserMenu(true);
+            setTimeout(
+                    function(){
+                        fc.user_tips = data.data.tips;
+                        fc_tips.prepare_user_tips(data.data.tips);
+                    },
+                    500
+                );
+        }
+    );
+};
+
+fc_tips.disable_ajax_requests = function() {
+    fc_tips.f_disable_ajax = true;
+};
+
+// Simple client side tip function not dependant on DB
+fc_tips.show_tip_once = function(id, selector, title, descr, leftpx, toppx) {
+    if(localStorage.getItem('fc_shown_tip_' + userid + id) == 1) {
+        return;
+    }
+    fc_tips.disable_ajax_requests();
+    var tipData = {
+        'id': id,
+        'title': title,
+        'descr': descr,
+        'selector': selector,
+        'leftpx': leftpx,
+        'toppx': toppx,
+        'f_news': 1 // Don't show "Hide these tips" 
+    };
+    fc_tips.create_tip(tipData);
+    localStorage.setItem('fc_shown_tip_' + userid + id, 1);
+};

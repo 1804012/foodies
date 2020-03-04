@@ -1,0 +1,2323 @@
+/* global todos_page, fc, url_to_project_unique_name, entities_data, fcif, week_first_day, user_date, VIEW_TYPE_LIST, VIEW_TYPE_KANBAN, VIEW_TYPE_GANTT */
+var data_id_selector = "todoid";
+var grp_sel = VIEW_TYPE_KANBAN === todos_page.view_type ? '.todo_group' : '.td_group';
+
+var initialized_todo_group_ids = {};
+todos_page.temp_todo_id = 1;
+todos_page.footer_timeout = null;
+todos_page.popup_card_timeout = null;
+todos_page.f_instant_actions_prepared = false;
+todos_page.f_ss_block_manual = false;
+
+$(function() {
+    // handle no permission group manage
+    $(document).on("click", ".no_permission", function(){
+        alert(no_permissions_str);
+    });
+
+    $(".toggle_subtasks").click(function(){
+        var context = todos_page.getTaskListSelector($(this).data('task-list-id'));
+        if ($(this).data("collapse")) {
+            var wrappers_to_collapse = $(context + " .todo_wrapper.parent_task:not(.children_hidden)");
+        } else {
+            wrappers_to_collapse = $(context + " .todo_wrapper.parent_task.children_hidden");
+        }
+        wrappers_to_collapse.each(function(){
+            toggle_children($(this), true);
+        });
+    });
+    
+    $(".toggle_task_lists").click(function() {
+        var f_collapse = $(this).data("collapse");
+        if(todos_page.view_type == VIEW_TYPE_GANTT) {
+            if(f_collapse) {
+                ganttCloseAllTaskLists();
+            } else {
+                ganttOpenAllTaskLists();
+            }
+            return false;
+        }
+        var all_task_lists = $(grp_sel);
+        all_task_lists.each(function(i, task_list) {
+            var task_list_id = $(task_list).data("todogroupid");
+            todos_page.toggle_task_list(task_list_id, f_collapse);
+        });
+    });
+    
+    // Filter assign to tags
+    fc.filterByText(".todos_filter_tags",".todos_filter_tags_field","ul.assignment li","span")
+
+    $(".avatar_with_popup").click(function(){
+        fc.showMentionsPopover($(this));
+        return false;
+    });
+
+    $("body").on("comment_added comment_deleted", function (e, data) {
+        if (!fkit.al_f_loaded) {
+            return;
+        }
+
+        var count = data.comments_count;
+        var id = data.item_id;
+        var f_visible = data.comments_count > 0;
+
+        if (VIEW_TYPE_GANTT === todos_page.view_type) {
+            $("div[task_id='"+id+"'] .gantt_count").text(count);
+            $("div[task_id='"+id+"'] .gantt_link").toggleClass("visible", f_visible);
+        } else {
+             $("#todo_" + id + " .comments_link:first").toggleClass("hide", !f_visible).find('.count_comments').text(count);
+        }
+    });
+});
+
+todos_page.prepareIndexHandlers = function(){
+    $(document).on("fcif_html_changed", function(e, params) {
+        if (params.f_instant) {
+            return;
+        }
+
+        if (todos_page.make_ordering) {
+            todos_page.initListSortable();
+        } else {
+            $(".drag").hide();
+        }
+
+        todos_page.prepareTodoGroups(); // should be called after initListSortable as disables d&d for collapsed
+        todos_page.makeDroppable();
+
+        if (todos_page.f_global) {
+            todos_page.hideEmptyGroups();
+        }
+
+        todos_page.restoreCollapsing();
+        todos_page.handlePaginationTip();
+
+        $("#content").removeClass("hide");
+    });
+
+    $("#datepicker").datepicker({
+        dateFormat: "d M yy",
+        firstDay: week_first_day,
+        onSelect: function(dateText, inst) {
+            var entered_date = $(this).datepicker("getDate");
+            var date = $.datepicker.formatDate( "yy-mm-dd",  entered_date);
+            var show_format = entered_date.getFullYear() !== (new Date()).getFullYear() ? "d M yy" : "d M";
+            var date_to_show = $.datepicker.formatDate(show_format, entered_date);
+            var f_for_due = $('#due_drag').hasClass('active');
+            var tag_html = f_for_due ? 
+            '<span class="fc_tag due_date_tag" data-type="due-date" data-value="' + date + '">' + tag_due_word_str + ' '
+            : '<span class="fc_tag start_date_tag" data-type="start_date" data-value="' + date + '">' + tag_start_word_str + ' '
+
+            if(Date.parse(entered_date) < Date.parse(user_date)) {//defined in the header
+                tag_html += '<span class="overdue_date">' + date_to_show + '</span>';
+            } else {
+                tag_html += date_to_show;
+            }
+            tag_html += '<a class="remove_tag ">\xa0</a></span>';
+            $("#datepicker").after( $(tag_html) );
+            todos_page.makeDraggables();
+        }
+    });
+
+    $(document).on("click", ".remove_tag", function() {
+        $(this).parents('.fc_tag').remove();
+    });
+
+    $(".date_swithcer").click(function() {
+        $(this).parent().find('.date_swithcer').removeClass('active');
+        $(this).addClass('active');
+    });
+
+    $(document).on("mouseenter", ".todo_wrapper .recurring", function () {
+        if (typeof $(this).attr("title") !== "undefined") {
+            return false;
+        }
+        if (typeof $(this).data("rrule") === "undefined") {
+            return false;
+        }
+        if (typeof $().recurrenceinput !== 'function') {
+            return false;
+        }
+        if (!$("#r_rule_hepler_form").length) {
+            // create helper form to generate human readable r_rule for a title attr
+            var form = $("<form></form>").attr("id", "r_rule_hepler_form").addClass("hide")
+                                         .append($("<textarea></textarea>").attr("id", "r_rule_hover")
+                                                                           .attr("name", "r_rule_hover")
+                                                                           .addClass("r_rule_hover"));
+            $(".content.body_width").append(form);
+        }
+        $("#r_rule_hover").recurrenceinput({readOnly: true, form: "#r_rule_hepler_form"}).loadData($(this).data("rrule"));
+        $(this).attr("title", $("#r_rule_hepler_form .ridisplay").text());
+    });
+
+    // List view
+    $(document).on("click", ".todo_group_title .collapse_group", function (e) {
+        var task_list_title = $(this).parents(".todo_group_title");
+        var task_list_id = task_list_title.data("task-list-id");
+        todos_page.toggle_task_list(task_list_id, !task_list_title.hasClass("collapsed"));
+    });
+    
+    $(document).on("keydown", ".add_td_content", function(e) {
+        if (!$(this).data("f_opened")) {
+            todos_page.openInlineForm($(this).parents("form"));
+            return;
+        }
+        
+        if (e.keyCode === 13) {
+            e.preventDefault();
+            if ($(this).val().length) {
+                $(this).parents('form').trigger('submit');
+            }
+        }
+    });
+
+    /**
+     * Adding a todo
+     */
+    $(document).on("submit", ".add_td", function(){
+        todos_page.onInlineFormSubmit($(this));
+        return false;
+    });
+
+    $(document).on("click", ".add_td a.cancel", function(e){
+        e.preventDefault();
+        var add_form = $(this).parents('.add_td');
+        $(".new_list_add").fadeIn();
+        add_form.find("fieldset").fadeOut("fast");
+        add_form.find('div.cancel > a').each(function() {
+            eval($(this).attr('href'));
+        });
+        var group_id = add_form.find('input[name="todo_group_id"]').val();
+        if(todos_page.f_milestones_page) {
+            var group_header = add_form.prev();
+            group_id = group_header.data("todogroupid");
+        }
+        clear_form(add_form, group_id);
+        todos_page.closeInlineForm(add_form);
+    });
+
+    $(document).on("click", "#saved_searches .saved_searches_title", function(e){
+        todos_page.f_ss_block_manual = true;
+        todos_page.toggleSavedSearchesBlock();
+    });
+
+    todos_page.prepareInstantActions();
+    todos_page.makeDraggables();
+    todos_page.initTagRemovers();
+    if (fc.isMobileVersion) {
+        $(".list_mobile_saved_searches").removeClass("hide").show();
+        $("#saved_searches").show().appendTo($(".list_mobile_saved_searches .fkit_dropdown_content"));
+    }
+};
+
+todos_page.openInlineForm = function(form) {
+    var input = form.find(".add_td_content");
+    input.data("f_opened", true);
+    var todo_group_id = form.find('input[name="todo_group_id"]').val();
+    var fc_upload_block_id = todo_group_id;
+    if(todos_page.f_milestones_page) {
+        var group_header = form.prev();
+        var milestone_id = group_header.data("todogroupid");
+        fc_upload_block_id = milestone_id;
+        todo_group_id = milestone_id;
+    }
+
+    if ( !(todo_group_id in initialized_todo_group_ids) ) {
+        if (form.hasClass("fkit_ignore")) {
+            // was not fkit-inited yet,
+            // enabling form and form elements for fkit handling
+            form.find(".fkit_ignore").addBack().removeClass("fkit_ignore");
+            fkit.initiatePlugins("#todo_group_form_" + todo_group_id);
+            if (todos_page.f_start_date) {
+                fkit.initStartEndDateConstraints("#todo_start_date_" + todo_group_id,
+                                                 "#todo_due_date_" + todo_group_id);
+            }
+        }
+
+        initialized_todo_group_ids[todo_group_id] = true;
+        initUploadsBlock("#fc_upload_block_" + fc_upload_block_id);
+    }
+    form.find("fieldset").fadeIn("fast", function(){
+        $(".new_list_add").fadeOut();
+        if (form.find(".cft_form").length && !$(".cft_template_include").is(":visible")) {
+            cft_auto_select(form.find(".cft_choose_template_select"));
+        }
+    });
+    fc.prepareRecurrenceHandlers(false, "#" + form.attr("id"), "#" + form.attr("id") + " .submit_inline");
+};
+
+todos_page.closeInlineForm = function(form) {
+    form.find("fieldset").fadeOut(function(){
+        var input = form.find(".add_td_content");
+        input.focus();
+        input.data("f_opened", false);
+    });
+};
+
+todos_page.onInlineFormSubmit = function(form) {
+    if (!fc.disableForm(form)) {
+        return false;
+    }
+
+    var group_id = form.find('.todo_group_id').val();
+    if(todos_page.f_milestones_page) {
+        if (VIEW_TYPE_LIST === todos_page.view_type) {
+            var group_header = form.prevAll(".todo_group_title:first")
+        } else {
+            var group_header = form.parent().find('.group_title');
+        }
+        form.find('.milestone_id').remove();
+        var milestone_id = group_header.data("task-list-id");
+        var linked_items = $('<input type="hidden" class="milestone_id" name="linked_items[4]" value="'+ milestone_id +'" />');
+        group_id = milestone_id;
+        form.append(linked_items);
+    }
+    var extra_params = {};
+
+    ajaxRequest(url_to_project_unique_name + "/todos/add_todo/", form.serializeFormJSON(), function(response){
+        var inline_input = form.find(".add_td_content");
+        if (VIEW_TYPE_LIST === todos_page.view_type) {
+            clear_form(form, group_id);
+            todos_page.closeInlineForm(form);
+        } else {
+            inline_input.val("").focus();
+        }
+        on_todo_add(response);
+    }, extra_params);
+};
+
+todos_page.prepareInstantActions = function() {
+    if (todos_page.f_instant_actions_prepared) {
+        return;
+    }
+    todos_page.f_instant_actions_prepared = true;
+
+    $(document).on("click", ".children_count", function(){
+        var todo_wrapper = $(this).closest(".todo_wrapper");
+        toggle_children(todo_wrapper);
+    });
+
+    $(document).on("fcif_instant_filter_applied", function(){
+        if (todos_page.f_global) {
+            todos_page.hideEmptyGroups(true);
+        }
+    });
+
+    todos_page.prepareCompletionClick();
+
+    $(document).on("click", ".tag_holder .remove", function(){
+        if(todos_page.f_milestones_page && $(this).parents('.mile_tags').length) {
+            todos_page.removeMileTag($(this).closest(".mile_tags"), $(this).parents('.fc_tag'));
+        } else {
+            todos_page.removeTag($(this).closest(".todo_wrapper"), $(this).parent());
+        }
+    });
+
+	// Clicking enter or escape forces focus out
+    $(document).on("keydown", ".td_description.being_edited", function(e) {
+        if(e.keyCode === 13 || e.keyCode === 27) {
+            e.preventDefault();
+            finish_editing($(this).closest(".todo_wrapper"));
+        }
+    });
+	// when you focus the td content check if content has changed or if its empty and handle approprieatly
+    $(document).on("focusout", ".td_description.being_edited", function(e) {
+        finish_editing($(this).closest(".todo_wrapper"));
+    });
+};
+
+todos_page.prepareCompletionClick = function() {
+    $(document).on("click", ".todo_wrapper .completion, .todos_kanban .completion", function(e){
+        e.stopPropagation(); e.preventDefault();
+
+        if($(this).hasClass('disabled')) {
+            return;
+        }
+
+        var todo_wrapper = $(this).closest(".todo_wrapper");
+
+        if (!todo_wrapper.length) {
+            // kanban popup card
+            var todo_id = $(this).closest(".todo").data(data_id_selector);
+            todo_wrapper = $("#todo_" + todo_id);
+        } else {
+            todo_id = todo_wrapper.data(data_id_selector);
+        }
+
+        var params = { progress: 'yes', cycle_progress:1, todoid: todo_id, 
+                       return_html: 1, f_list_page: todos_page.f_list_page ? 1 : 0};
+
+        fc.blink($(this));
+        todos_page.update_ajax(params, todo_wrapper);
+    });
+};
+
+todos_page.kanbanTaskAddForm = function(group_block) {
+    var todo_group_id = group_block.data("todogroupid");
+    var form_template = $("#todo_group_form_template").clone(false);
+    form_template.attr("id", "todo_group_form_" + todo_group_id);
+    if(!todos_page.f_milestones_page){
+        form_template.find(".todo_group_id").val(todo_group_id);
+    }
+    group_block.find("td").first().append(form_template);
+    form_template.show();
+};
+
+todos_page.prepareTodoGroups = function() {
+    var groups_ids = [];
+    $(".td_group:not(.f_fake_group)").each(function(){
+        var todo_group_id = $(this).data("todogroupid");
+        groups_ids.push(todo_group_id);
+
+        var f_group_visible = !getTDGroupCollapsed(todo_group_id);
+        if (!f_group_visible) {
+            if (todos_page.make_ordering) {
+                $(this).sortable( "option", "disabled", true);
+            }
+            $(this).hide().addClass("collapsed").prev(".todo_group_title").addClass("collapsed");
+            $(this).prev(".todo_group_title").find(".mile_desc").hide();
+        }
+
+        if (todos_page.f_global) {
+            // no need to handle forms
+            return;
+        }
+
+        var form_template = $("#todo_group_form_template").clone(false);
+        form_template.find(".fc_upload_item template, .fc_upload_block_template").remove(); // no sense to keep
+        form_template.attr("id", "todo_group_form_" + todo_group_id);
+        form_template.find(".todo_group_id").val(todo_group_id);
+        form_template.find(".fc_upload_block").attr("id", "fc_upload_block_" + todo_group_id);
+        form_template.find(".attach_target").attr("id", "todo_description_" + todo_group_id);
+        form_template.find("label.todo_start_date").attr("for","todo_start_date_"+ todo_group_id);
+        form_template.find("input.todo_start_date").attr("id","todo_start_date_"+ todo_group_id);
+        form_template.find("label.todo_due_date").attr("for","todo_due_date_"+ todo_group_id);
+        form_template.find("input.todo_due_date").attr("id","todo_due_date_"+ todo_group_id);
+        form_template.find("#repeat_chbx").attr("id","repeat_chbx_"+ todo_group_id);
+        form_template.find(".repeat_chbx_label").attr("for","repeat_chbx_"+ todo_group_id);
+        form_template.find("#r_rule_inline").attr("id","r_rule_inline_"+ todo_group_id);
+
+        // handling milestones if they are there
+        if (form_template.find(".milestone_link_cont").length) {
+            todos_page.temp_todo_id++;
+            form_template.find(".add_link_milestone").data("id", 'new_'+todos_page.temp_todo_id);
+            form_template.find(".linked_milestone").attr("id", "linked_milestone_new_" + todos_page.temp_todo_id);
+        }
+
+        $(this).after(form_template);
+        form_template.toggle(f_group_visible);
+    });
+};
+
+todos_page.makeDraggables = function(){
+    $(".draggables .fc_tag").draggable({
+        revert: 'invalid',
+        cursor: 'move',
+        helper: 'clone',
+        appendTo: "body"
+    });
+};
+
+todos_page.tagRemoverTimeout = null;
+todos_page.initTagRemovers = function(){
+    $(document).on("mouseenter mouseleave", ".td .fc_tag", function (e) {
+        clearTimeout(todos_page.tagRemoverTimeout);
+        var remover = $(this).find(".remove");
+
+        if (e.type === 'mouseleave') {
+            remover.stop().fadeOut();
+            return;
+        }
+
+        todos_page.tagRemoverTimeout = setTimeout(function(){
+            if (remover.closest(".todo_wrapper, .mile_tags").data('is_disabled')) {
+                return;
+            }
+
+            remover.fadeIn('fast');
+        }, 200);
+    });
+};
+
+/* Updates a todo on the standard view page, comments page for subtasks
+ * and completion change for subtask from kanban */
+todos_page.update_ajax = function(params, todo_wrapper) {
+    if (todo_wrapper.data('is_disabled')) {
+        $(".temp_tag").remove();
+        return;
+    }
+    todo_wrapper.data('is_disabled', true);
+
+    var url_prefix = url_to_project_unique_name;
+    if (todos_page.f_global) {
+        params['f_global'] = 1;
+        url_prefix = todo_wrapper.parents(grp_sel).data("prjurlprefix");
+    }
+    params["view_type"] = todos_page.view_type;
+    params["f_include_list_html"] = fkit.al_f_loaded ? 1 : 0;
+
+    params['f_comments'] = todos_page.f_comments ? 1 : 0;
+
+    ajaxRequest(url_prefix + "/todos/edit_todo/", params, function(response){
+        if(response.data.due_date_warn_msg) {
+            $.flash_action(response.data.due_date_warn_msg, 5000, 'warn');
+        }
+        
+        if(response.data.start_date_warn_msg) {
+            $.flash_action(response.data.start_date_warn_msg, 5000, 'warn');
+        }
+        
+        todo_wrapper.data('is_disabled', false);
+        $(".temp_tag").remove();
+
+        if (!response.data.html) {
+            // nothing changed
+            return;
+        }
+
+        hidePopupCard();
+
+        var todo = $(response.data.html);
+
+        todos_page.restoreCollapsing(todo);
+        if (!todos_page.make_ordering) {
+            todo.find(".drag").hide();
+        }
+
+        var updated_todo_id = response.data.updated_todo_id;
+        if (VIEW_TYPE_GANTT === todos_page.view_type) {
+            ganttOnTaskEdit(response.data.gantt_data);
+        } else {
+            if (todos_page.f_comments) {
+                var wrapper_to_replace = $("#view_todo_" + updated_todo_id);
+                if (wrapper_to_replace.parents("#todo_parent_div").length) {
+                    location.reload();
+                    return;
+                }
+                todo = todo.find("#view_todo_" + updated_todo_id);
+            } else {
+                wrapper_to_replace = $("#todo_" + response.data.returned_todo_id);
+            }
+            wrapper_to_replace.replaceWith(todo);
+        }
+
+        if (fkit.al_f_loaded) {
+            if (updated_todo_id == fkit.al_loaded_id) {
+                fkit.al_reload();
+            } else {
+            var view_wrapper_to_replace = $("#view_todo_" + updated_todo_id);
+            var view_todo = $(response.data.html_list);
+            if (view_wrapper_to_replace.parents("#todo_parent_div").length) {
+                view_todo.find(".todo_wrapper").remove();
+            }
+            view_wrapper_to_replace.replaceWith(view_todo);
+        } 
+        } 
+
+        if (todos_page.f_comments || VIEW_TYPE_GANTT === todos_page.view_type) {
+            return;
+        }
+
+        if (VIEW_TYPE_LIST === todos_page.view_type) {
+            todos_page.makeDroppable();
+        }
+
+        todos_page.applyImprovedFilters(response.data.item_basic_data);
+    });
+};
+
+todos_page.applyImprovedFilters = function(items_data){
+    if (todos_page.f_comments) {
+        return;
+    }
+
+    var item_data = items_data[0];
+    var add = true;
+    for (var i=0; i < entities_data.length; i++) {
+        if (entities_data[i].id === item_data.id) {
+            entities_data[i] = item_data;
+            add = false;
+            break;
+        }
+    }
+    if (add) {
+        entities_data.push(item_data);
+    }
+
+    var filters = fcif.getAppliedInstantFilters(fcif.getSelectedConditions());
+    var todo_wrapper = $("#" + fc.fcif_itemid_prefix + item_data['id']);
+    if ( (add && !fcif.isComplyingFilters(item_data, filters))
+        || (todo_wrapper.hasClass("dimmed") && !todo_wrapper.find(".todo_wrapper:visible").length) )
+    {
+        todo_wrapper.delay(2000).addClass("dimmed");
+    }
+};
+
+/* handles dropping tags on todos */
+todos_page.updateTodo = function(todo_wrapper, $tag){
+    var data_attr = $tag.data();
+    var params = {
+        todoid: todo_wrapper.data(data_id_selector),
+        return_html: 1
+    };
+    params[data_attr.type] = data_attr.value;
+    todos_page.update_ajax(params, todo_wrapper);
+};
+
+todos_page.updateMile = function(mile, $tag, $old_tag){
+    var data_attr = $tag.data();
+    var params = {
+        milestone_id: mile.data('task-list-id')
+    };
+    params[data_attr.type] = data_attr.value;
+
+    mile.data('is_disabled', true);
+    ajax_mile_update(params, mile, $tag, $old_tag);
+};
+
+function ajax_mile_update(params, mile, $tag, $old_tag) {
+
+    var url_prefix = url_to_project_unique_name;
+    ajaxRequest(url_prefix + '/milestones/edit_mile', params, function (response) {
+        mile.data('is_disabled', false);
+        var f_no_old_tag = !$old_tag.length;
+        if(f_no_old_tag) {
+            $old_tag = $('<span class="fc_tag"><span class="shell"><svg width="21px" height="16px" fill="currentColor" viewBox="0 0 21 16" class="icon"><use xlink:href="#priority-icon-0"></use></svg><div class="title "></div><a class="remove" style="display: none;"></a></span></span>');
+            var data_attr = $tag.data();
+            $old_tag.attr('data-type', data_attr.type);
+            $old_tag.attr('data-value', data_attr.value);
+            if(data_attr.type != 'priority') {
+                $old_tag.find('svg').remove();
+            }
+        }
+        fc.blink($old_tag, true);
+        if(response.data.due_date_warn_msg) {
+            $.flash_action(response.data.due_date_warn_msg, 5000, 'warn');
+            return;
+        }
+
+        if(response.data.start_date_warn_msg) {
+            $.flash_action(response.data.start_date_warn_msg, 5000, 'warn');
+            return;
+
+        }
+
+        if (jQuery.isEmptyObject(response.data)) {
+            // nothing changed
+            return;
+        }
+        var available_to_remove_fields = ['priority', 'start_date', 'assigned-to'];
+        var tag_type = $old_tag.data('type');
+        var $old_tag_shell = $old_tag.children('span.shell');
+        var $tag_icon = $old_tag_shell.children('.icon');
+        var $tag_title = $old_tag_shell.children('.title');
+        var response_tag_type = tag_type == 'assigned-to'? 'assigned_to_id' : tag_type;
+
+        if((available_to_remove_fields.indexOf(tag_type) != -1)
+            && (response.data[response_tag_type] == 0 || response.data[response_tag_type] == null)) {
+            if(response_tag_type == 'start_date') {
+                console.log(response_tag_type);
+                $old_tag.find('.title.start-date').remove();
+            } else {
+                $old_tag.remove();
+            }
+        }
+
+        if(response.data.completed != null) {
+            $old_tag.attr('data-value', response.data.completed);
+            $old_tag.attr('class', 'fc_tag prog_class_'+ response.data.completed);
+            $tag_icon.attr('class', 'icon progress prog_class_'+ response.data.completed);
+            $tag_title.attr('class', 'title progress prog_class_'+ response.data.completed);
+	        $tag_icon.children('use').attr('xlink:href', '#progress-icon-'+ response.data.completed);
+	        $tag_title.text(response.data.completed_name);
+            mile.find('.mile_icon').attr('class', 'mile_icon prog_class_'+ response.data.completed);
+        } else if(response.data.assigned_to_id != null) {
+            $old_tag.attr('data-value', response.data.assigned_to_id);
+            $tag_title.text(response.data.assigned_to_fullname);
+        } else if(response.data.priority != null) {
+            $old_tag.attr('data-value', response.data.priority);
+            $old_tag.attr('class', 'fc_tag pri_class_'+ response.data.priority);
+            $tag_icon.attr('class', 'icon priority pri_class_'+ response.data.priority);
+            $tag_title.attr('class', 'title priority pri_class_'+ response.data.priority);
+            $tag_icon.children('use').attr('xlink:href', '#priority-icon-'+ response.data.priority);
+            $tag_title.text(response.data.priority_name);
+        } else if(response.data.start_date != null) {
+            var start_date_title = $old_tag_shell.children('.title.start-date');
+            if(!start_date_title.length) {
+                start_date_title = $('<span class="mile_tag_date title start-date"></span>');
+                mile.find('.date_icon').after(start_date_title);
+            }
+            start_date_title.attr('data-value', response.data.start_date);
+            start_date_title.html(response.data.start_date_formatted  + '<a class="remove" style="display: none;"></a>');
+        } else if(response.data.due_date != null) {
+            var due_date_title = $old_tag_shell.children('.title.due-date');
+            due_date_title.attr('data-value', response.data.due_date);
+            due_date_title.html(response.data.due_date_formatted);
+        }
+
+        if(f_no_old_tag) {
+            if(tag_type == 'priority') {
+                mile.find('.tag_holder').prepend($old_tag);
+            } else if(tag_type == 'assigned-to') {
+                mile.find('.fc_tag.due-date.start_date').before($old_tag);
+            }
+        }
+    }, {
+        onError: function(response) {
+            fc.displayError({"title": "", "content": response.message, "error_id": ''}, 8000);
+        }
+    })
+}
+/**
+ * Remove assigned tags
+ */
+todos_page.removeTag = function(todo_wrapper, $tag) {
+    var data_attr = $tag.data();
+    var params = {
+        todoid: todo_wrapper.data(data_id_selector),
+        return_html: 1
+    };
+    params[data_attr.type] = 0;
+    fc.blink($tag);
+    todos_page.update_ajax(params, todo_wrapper);
+};
+
+todos_page.removeMileTag = function(mile, $tag) {
+    var data_attr = $tag.data();
+    var $old_tag = $tag.clone();
+    if(!data_attr.type && $tag.find('.start-date').length) {
+        data_attr.type = 'start_date';
+    }
+    var params = {
+        milestone_id: mile.data('task-list-id')
+    };
+    params[data_attr.type] = 0;
+    fc.blink($tag);
+    ajax_mile_update(params, mile, $old_tag, $tag);
+};
+
+/* for dropping tags on todos on list view */
+todos_page.makeDroppable = function() {
+    var todos_to_drop = $('.td_group.subt_g .todo_wrapper, .td_group.check_g .todo_wrapper:not(.subtask), .mile_tags');
+    todos_to_drop.droppable({
+        accept: ".fc_tag",
+        greedy: true,
+        drop: function( event, ui ) {
+	        var $draggable = ui.draggable.clone();
+	        $draggable.addClass("temp_tag");
+	        var holder = $(this).children(".td").find(".tag_holder");
+	        var curr_tag_of_type = holder.find(".fc_tag[data-type='" + $draggable.data('type') + "']");
+	        if (!todos_page.f_milestones_page)
+	        {
+		        if (curr_tag_of_type.length) {
+			        if (curr_tag_of_type.data('value') == $draggable.data('value')) {
+				        return;
+			        }
+			        curr_tag_of_type.replaceWith($draggable);
+		        } else {
+			        holder.append($draggable);
+		        }
+		        fc.blink($draggable);
+	        }
+            if (todos_page.f_milestones_page && $(this).hasClass('mile_tags')) {
+                var $old_tag = curr_tag_of_type;
+                if(!$old_tag.length) {
+                    $old_tag = holder.find(".fc_tag." + $draggable.data('type'));
+                }
+	            fc.blink($old_tag);
+                todos_page.updateMile($(this), $draggable, $old_tag);
+            } else {
+                todos_page.updateTodo($(this), $draggable);
+            }
+            $("#datepicker").val("").blur();
+        },
+        hoverClass: 'to-do-highlight'
+    });
+};
+
+todos_page.makeSidebarFloating = function(shift) {
+    shift = shift || 0;
+    var $sidebar = $('.todo_right_col');
+    var right_rail_top = $sidebar.offset().top;
+    var $left_col = $(".todo_left_col");
+    var $wrapper = $(".todo_columns_wrapper");
+    var curr_state = null;
+    var timer = null;
+
+    function correctSidebarLeft() {
+        if (fc.f_rtl) {
+            $sidebar.css('left', $wrapper.offset().left);
+        } else {
+            $sidebar.css('left', $left_col.offset().left + $left_col.outerWidth() - $(window).scrollLeft() + 20);
+        }
+    }
+
+    function correctSidebarFixed() {
+        var MAX_TASKS_TO_WORK = 250;
+
+        var f_forbid_fixed = $(".todo_wrapper:visible").length > MAX_TASKS_TO_WORK;
+
+        var too_high = $sidebar.height() > $(window).height();
+        if (!f_forbid_fixed && too_high && !todos_page.f_ss_block_manual) {
+            todos_page.toggleSavedSearchesBlock(true);
+        }
+
+        var f_fixed = !f_forbid_fixed
+                        && $(window).scrollTop() + shift >= right_rail_top
+                        && ($left_col.height() > $sidebar.height())
+                        && ($sidebar.height() < $(window).height());
+
+        if (curr_state === f_fixed) {
+            return;
+        }
+
+        curr_state = f_fixed;
+        if (f_fixed) {
+            $wrapper.addClass('at_top');
+            correctSidebarLeft();
+        } else {
+            $wrapper.removeClass('at_top');
+        }
+    }
+
+    correctSidebarFixed();
+
+    $(window).scroll(function() {
+        clearTimeout(timer);
+        timer = setTimeout(correctSidebarFixed, 10);
+    }).resize(function(){
+        correctSidebarLeft();
+    });
+};
+
+todos_page.toggleSavedSearchesBlock = function(force_collapse) {
+    force_collapse = force_collapse || false;
+    var block = $("#saved_searches_container");
+    var f_collapse = block.data('f_collapsed') ? false : true;
+    if (force_collapse && !f_collapse) {
+        // already collapsed
+        return;
+    }
+    $(".saved_search_div:not(.block_title,.template), .current_search_div").toggle(!f_collapse);
+    block.data('f_collapsed', f_collapse);
+    if (f_collapse) {
+        $(".saved_search_div.block_title").append("<span id='darr'>&dArr;</span>");
+    } else {
+        $(".saved_search_div #darr").remove();
+    }
+};
+
+function archiveGroup(link) {
+
+    if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+         var todo_group = link.parents(".todo_group");
+    } else {
+        var group_header = link.parents(".todo_group_title");
+        var todo_group = group_header.next(".td_group");
+    }
+
+    var archivate = todo_group.data("isarchived") ? 0 : 1;
+    var url_suffix = "/todos/todos_groups/archive_group/";
+    var todo_group_id = todo_group.data("todogroupid");
+    var data = {todo_group_id: todo_group_id, archivate: archivate};
+    if(todos_page.f_milestones_page) {
+        var milestone_id = todo_group_id;
+        url_suffix = "/milestones/archive_milestone/";
+        data = {milestone_id: milestone_id, archivate: archivate};
+    }
+
+    ajaxRequest(
+            url_to_project_unique_name + url_suffix,
+            data,
+            function() {
+                if (VIEW_TYPE_LIST === todos_page.view_type) {
+                    group_header.remove();
+                    var form = $("#todo_group_form_" + todo_group_id);
+                    form.next(".divider").remove();
+                    form.remove();
+                }
+                todo_group.remove();
+                $.flash_action(group_updated_msg_str);
+                if (!$(grp_sel).length) {
+                    fcif.applied_string_hash = '';
+                    fcif.apply_filters(0, true);
+                }
+            });
+}
+
+function deleteGroup(link) {
+    var todo_group;
+    var todo_group_id;
+    if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+        todo_group = link.parents(".todo_group");
+        todo_group_id = todo_group.data("todogroupid");
+    } else if(VIEW_TYPE_GANTT == todos_page.view_type) {
+        todo_group_id = link.data("item_id");
+        var gantt_url_to_project = getGanttUrlPrefix("g_"+todo_group_id);
+    } else {
+        var group_header = link.parents(".todo_group_title");
+        todo_group_id = group_header.data("task-list-id");
+        todo_group = $("#todo_group_" + todo_group_id);
+    }
+    
+    var url_to_project = VIEW_TYPE_GANTT == todos_page.view_type ? gantt_url_to_project : url_to_project_unique_name;
+
+    ajaxRequest(
+        url_to_project + "/todos/todos_groups/delete_todo_group/"+todo_group_id,
+        function() {
+            if (VIEW_TYPE_LIST === todos_page.view_type) {
+                group_header.remove();
+                var form = $("#todo_group_form_" + todo_group_id);
+                form.next(".divider").remove();
+                form.remove();
+            }
+            if(VIEW_TYPE_GANTT != todos_page.view_type) {
+                todo_group.remove(); 
+                if (!$(grp_sel).length) {
+                    fcif.reapply_filters();
+                }   
+            } else {
+                fcif.reapply_filters();
+            }
+            $.flash_action(group_updated_msg_str);
+        });
+}
+
+todos_page.getCollapsedTasksIDs = function(){
+    return store.get("collapsed_tasks_" + userid) || [];
+};
+
+todos_page.restoreCollapsing = function(scope){
+    scope = scope || false;
+
+    var collapsed_selectors = [];
+    var collapsed_ids = todos_page.getCollapsedTasksIDs();
+    collapsed_ids.forEach(function(id) {
+        collapsed_selectors.push("#todo_" + id);
+    });
+    var collapsed_selector = collapsed_selectors.join();
+    if (scope) {
+        var collapsed = scope.find(collapsed_selector).addBack(collapsed_selector);
+    } else {
+        collapsed = $(collapsed_selector);
+    }
+    collapsed.addClass("children_hidden");
+
+    if (todos_page.f_comments || fkit.al_f_loaded) {
+        if (collapsed_ids.indexOf(todos_page.curr_task_id) < 0) {
+            $("#todo_children_div").removeClass('children_hidden');
+        } else {
+            $(".show_subtasks").addClass('children_hidden');
+        }
+    }
+};
+
+todos_page.storeCollapsedState = function(todo_id, hide) {
+    todo_id = parseInt(todo_id);
+    var MAX_COLLAPSED_COUNT = 1500;
+    hide = hide || false;
+    var collapsed_ids = store.get("collapsed_tasks_" + userid) || [];
+    if (hide) {
+        collapsed_ids.push(todo_id);
+        if (collapsed_ids.length > MAX_COLLAPSED_COUNT) {
+            fc.registerError('Collapsed limit reached: ' + MAX_COLLAPSED_COUNT, false, true, 'error');
+            collapsed_ids.splice(0, Math.floor(MAX_COLLAPSED_COUNT/3));
+        }
+    } else if (collapsed_ids.indexOf(todo_id)+1) {
+        collapsed_ids.splice(collapsed_ids.indexOf(todo_id), 1);
+    }
+    store.set("collapsed_tasks_" + userid, collapsed_ids);
+}
+
+function on_title_click(todo_title){
+    var DBL_CLICK_TIMEOUT_MS = 300;
+    if (todo_title.hasClass('being_edited')) {
+        return true;
+    }
+
+    var timeout = todo_title.data('timeout');
+    if (timeout) {
+        // this is a dbl click
+        todo_title.data('timeout', null);
+        clearTimeout(timeout);
+        enable_title_edit(todo_title.closest(".todo_wrapper"));
+        return false;
+    }
+
+    var f_do_ajax_load = fc.f_init_ajax_load && todo_title.hasClass("load_page_via_ajax");
+
+    var timeout = setTimeout(function() {
+        todo_title.data('timeout', null);
+        if (f_do_ajax_load) {
+            fkit.al_on_ajax_link_click(todo_title, todo_title.attr("href"));
+        } else {
+            window.location = todo_title.attr('href');
+        }
+    }, DBL_CLICK_TIMEOUT_MS);
+    
+    todo_title.data('timeout', timeout);
+}
+
+fc.edited_todo_title = null;
+function enable_title_edit(todo_wrapper){
+    var todo_title = todo_wrapper.children(".td").find('.td_description');
+    todo_title.prop("contenteditable", true).removeClass('no_selection').css('cursor', 'auto');
+    todo_title.blur().focus(); // In Firefox, caret is not visible at this point - current line makes sure caret is visible.
+    moveCaretToEnd(todo_title[0]);
+    todo_title.addClass("being_edited");
+    fc.edited_todo_title = todo_title.html();
+}
+
+function disable_title_edit(todo_wrapper) {
+    var todo_title = todo_wrapper.children(".td").find(".td_description");
+
+    todo_title.removeClass("being_edited")
+            .prop("contenteditable", false)
+            .addClass('no_selection')
+            .css('cursor', 'pointer');
+    fc.edited_todo_title = null;
+}
+
+function finish_editing(todo_wrapper){
+    var todo_title = todo_wrapper.children(".td").find(".td_description");
+
+    if (todo_title.html() === "") {
+        todo_title.html(deafult_task_title_str);
+    }
+
+    if (fc.edited_todo_title === todo_title.html()) {
+        disable_title_edit(todo_wrapper);
+        return;
+    }
+
+    var params = {};
+    params.todo_title = todo_title.text();
+    params.todoid = todo_wrapper.data(data_id_selector);
+
+    var url_prefix = url_to_project_unique_name;
+    if (todos_page.f_global) {
+        url_prefix = todo_wrapper.parents(grp_sel).data("prjurlprefix");
+    }
+
+    ajaxRequest(url_prefix + "/todos/edit_todo/", params, function(response) {
+        disable_title_edit(todo_wrapper);
+        if(fkit.al_loaded_id == params.todoid) {
+            $('.al_todo_title').text(response.data.description);
+        }
+    });
+}
+   
+function delete_td(yes_link) {
+    var todo_id = yes_link.data('item_id');
+    var url_to_project = yes_link.parents('.al_container').length ? fkit.al_url_to_project_unique : url_to_project_unique_name;
+    ajaxRequest(url_to_project + "/todos/delete_todo/", { todoid: todo_id }, function (response) {
+        on_todo_delete(response, yes_link);
+    });
+}
+
+function delete_td_things(todo_id) {
+    var params = {'id': todo_id};
+    //Inform all subscribers that the todo is deleted
+    jQuery(document).trigger('delete_todo_record_event', params);
+
+    if (VIEW_TYPE_GANTT === todos_page.view_type) {
+        return;
+    }
+
+    for (var i=0; i < entities_data.length; i++) {
+        if (entities_data[i].id === todo_id) {
+            entities_data.splice(i, 1);
+            break;
+        }
+    }
+}
+
+function clear_form($elem, todo_group_id) {
+    // clear form data 
+    $elem.trigger("reset");
+    $(".cft_template_include").hide();
+
+    $elem.find(".repeat_chbx").prop("checked", false).change();
+
+    $("#fc_upload_block_" + todo_group_id).fcUpload('destroy');
+    CKEDITOR.instances["todo_description_" + todo_group_id].setData('');
+    CKEDITOR.instances["todo_description_" + todo_group_id].updateElement();
+
+    delete(initialized_todo_group_ids[todo_group_id]);
+}
+
+// help function for language phrases generation
+// used only once for now
+function js_sprintf(format) {
+   var values = Array.prototype.slice.call(arguments, 1);
+   function insert(str, val) { return str.replace(/%s/, val); }
+   return values.reduce(insert, format);
+}
+
+// actions on comments page
+$(document).on("click", ".todo-one-click-action", function(e) { 
+    e.preventDefault();
+    var $th = $(this),
+        params = {},
+        fieldName = $th.attr('data-todo-field'),
+        fieldValue = $th.attr('data-todo-field-value');
+    params['todoid'] = $th.data(data_id_selector);
+    params['completed_date'] = $('#todo_completed_date_in_comment').val();
+    params['return_html'] = 1;
+    params['view_type'] = todos_page.view_type;
+    params[fieldName] = fieldValue;
+    params['f_milestones_page'] = todos_page.f_milestones_page;
+    var project_url = todos_page.f_global ? fkit.al_url_to_project_unique : url_to_project_unique_name;
+
+    ajaxRequest(project_url + "/todos/edit_todo/", params, function (data) {
+        // Check which field we are updating
+        if (fieldName === 'assigned-to') {
+            if (fieldValue == '0') {
+                $th.text(assign_to_me_str);
+                fieldValue = userid;
+                $(".assigned-to .value").text(unassigned_word_str);
+            } else {
+                $th.text(remove_assignment_str);
+                fieldValue = 0;
+                $(".assigned-to .value").text(data.data.assigned_to_fullname);
+            }
+        } else if (fieldName === 'progress') {
+            if (fieldValue == '2') {
+                $th.text(complete_on_btn_title);
+                fieldValue = '1';
+                $(".progress .value").text(data.data.completed_name);
+                $("#todo_completed_date_in_comment").next().show();
+            } else if (fieldValue == '1') {
+                $th.text(restart_btn_title_str);
+                fieldValue = '0';
+                $(".progress .value").text(js_sprintf(todos_page.on_str, data.data.completed_name, $("#todo_completed_date_in_comment").next().val()));
+                $("#todo_completed_date_in_comment").next().hide();
+            } else if (fieldValue == '0') {
+                $th.text(start_btn_title_str);
+                fieldValue = '2';
+                $(".progress .value").text(data.data.completed_name);
+                $("#todo_completed_date_in_comment").next().hide();
+            }
+        }
+        // Update the attribute to new value
+        $th.attr("data-todo-field-value", fieldValue);
+        if (fkit.al_f_loaded) {
+            if (VIEW_TYPE_GANTT === todos_page.view_type) {
+                // action source is RP
+                ganttOnTaskEdit(data.data.gantt_data);
+            } else {
+                on_todo_edit(data, true);
+            }
+        }
+    });
+});
+
+function getTDGroupCollapsed(todo_group_id) {
+    f_collapsed = store.get("tdg_collapsed_"+todo_group_id);
+    return f_collapsed ? true : false;
+}
+
+function setTDCroupCollapsed(todo_group_id, value){
+    if (value) {
+        store.set("tdg_collapsed_"+todo_group_id, true);
+    } else {
+        store.remove("tdg_collapsed_"+todo_group_id);
+    }
+}
+
+function fcif_app_params() {
+    if (todos_page.f_gantt_projects) {
+        return {f_gantt_projects: true};
+    }
+    if(todos_page.f_milestones_page) {
+        return {ms_view_type: todos_page.view_type, show_archived: todos_page.show_archived,
+            page_num: (fc.page_num || 0)};
+    }
+    return {tasks_view_type: todos_page.view_type, show_archived: todos_page.show_archived,
+            page_num: (fc.page_num || 0)};
+}
+
+function fcif_before_replace_hook(params) {
+    if (params.f_instant) {
+        return;
+    }
+    for (var todo_group_id in initialized_todo_group_ids) {
+        $("#fc_upload_block_" + todo_group_id).fcUpload('destroy');
+        var instance = CKEDITOR.instances["todo_description_" + todo_group_id];
+        if (instance) {
+            instance.destroy();
+        }
+    }
+    initialized_todo_group_ids = {};
+    $('#content').addClass("hide"); // to avoid jumps on collapsing things
+}
+
+todos_page.show_message_about_not_shown_list = function() {
+    $(".flash_message").html(list_is_not_shown_str).slideDown().delay(4000).slideUp();
+};
+
+/* Handling popup on kanban, list, gantt views */
+function on_todo_edit(response, inline_edit) {
+    inline_edit = inline_edit || false;
+    var data = response.data;
+    if (VIEW_TYPE_GANTT === todos_page.view_type) {
+        if (fkit.al_f_loaded) {
+            fkit.al_reload();
+        }
+        ganttOnTaskEdit(data.gantt_data);
+        fkit.modal_opened.fkit_modal_close();
+        return;
+    }
+
+    if (fkit.al_f_loaded && !inline_edit && data.updated_todo_id == fkit.al_loaded_id) {
+        fkit.al_reload();
+    }
+
+    var todo = $("#todo_" + data.returned_todo_id);
+    if (data.html) {
+        // there were changes
+        var new_todo = $(data.html);
+        todos_page.restoreCollapsing(new_todo);
+        todo.replaceWith(new_todo);
+        todo = $("#todo_" + data.returned_todo_id);
+
+        if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+            var old_todo_group_id = todo.parents(".todo_group").data("todogroupid");
+            var old_progress = todo.parents(".progress_cell").data("progress");
+        } else {
+            if (!todos_page.make_ordering) {
+                todo.find(".drag").hide();
+            }
+            todos_page.makeDroppable();
+            old_todo_group_id = todo.parents(".td_group").data("todogroupid");
+            old_progress = data.completed; // does not matters for standard page
+        }
+
+        if (old_todo_group_id != data.todo_group_id || old_progress != data.completed) {
+            // should move from old place
+            var task_list = $("#todo_group_" + data.todo_group_id);
+            if (!task_list.length) {
+                // no destination task list on the page - just remove
+                todo.remove();
+                if (!inline_edit) {
+                    fkit.modal_opened.fkit_modal_close();
+                }
+                todos_page.show_message_about_not_shown_list();
+                return;
+            }
+
+            if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+                var right_cell = task_list.find(".progress_cell[data-progress='"+data.completed+"']");
+            } else {
+                right_cell = task_list;
+            }
+            var dnd_target = right_cell.find(".dnd_target");
+            if (dnd_target.length) {
+                todo.insertBefore(dnd_target);
+            } else {
+                todo.appendTo(right_cell);
+            }
+        }
+
+        todos_page.applyImprovedFilters(data.item_basic_data);
+    }
+
+    var updated_todo = $("#todo_" + data.updated_todo_id);
+    fc.highlight_elements(updated_todo.children('.td, .todo').addBack());
+    if (!inline_edit) {
+        fkit.modal_opened.fkit_modal_close();
+    }
+}
+
+function finalize_todo_add(f_add_another) {
+    if (f_add_another) {
+        fkit.modal_opened.modal_reload = true;
+        if (todos_page.f_comments || fkit.al_f_loaded) {
+            // Set reload value to true
+            fkit.modal_opened.modal_reload_page = true;
+        }
+        fkit.modal_opened.ajaxLoad();
+    } else {
+        if(fkit.modal_opened) {
+            fkit.modal_opened.fkit_modal_close();
+        }
+        if (fkit.al_f_loaded) {
+            fkit.al_reload();
+        }
+    }
+}
+
+function on_todo_add(response) {
+    var data = response.data;
+
+    if (todos_page.f_comments) {
+        // subtask was added, need to reload comments page if this is the last subtask added
+        if (data.f_add_another) {
+            finalize_todo_add(data.f_add_another);
+        } else {
+            fc.f_ajax_redirect = true;
+            location.reload();
+        }
+        return;
+    }
+
+    if (VIEW_TYPE_GANTT === todos_page.view_type) {
+        var ganttData = data.gantt_data;
+        ganttOnTaskAdd(ganttData);
+        finalize_todo_add(data.f_add_another);
+        return;
+    }
+
+    var task_list = $("#todo_group_" + data.todo_group_id);
+    if (!task_list.length) {
+        // list is not shown, nothing to do
+        finalize_todo_add(data.f_add_another);
+        todos_page.show_message_about_not_shown_list();
+        return;
+    }
+
+    var todo = $(data.html);
+    if (data.returned_todo_id !== data.updated_todo_id) {
+        // parent task returned as subtask editing affected parent(s)
+        var wrapper_to_replace = $("#todo_" + data.returned_todo_id);
+        todos_page.storeCollapsedState(data.returned_todo_id, false);
+        todos_page.restoreCollapsing(todo);
+        wrapper_to_replace.replaceWith(todo);
+        var updated_wrapper = $("#todo_" + data.updated_todo_id);
+        fc.highlight_elements(updated_wrapper.children('.td, .todo').addBack());
+        if (VIEW_TYPE_LIST === todos_page.view_type) {
+            todos_page.makeDroppable();
+            if (!todos_page.make_ordering) {
+                todo.find(".drag").hide();
+            }
+        }
+        var $updated_todo = $(data.html_list).find("#view_todo_"+data.updated_todo_id);
+        if ($updated_todo.data("parent-id")) {
+            if($("#todo_children_div #view_todo_"+$updated_todo.data("parent-id")).find(".todo_wrapper").length) {
+                $("#todo_children_div #view_todo_"+$updated_todo.data("parent-id")).find(".todo_wrapper").last().after($updated_todo);
+            } else {
+                $("#todo_children_div #view_todo_"+$updated_todo.data("parent-id")).find(".td").after($updated_todo);
+            }
+        } else {
+            $("#todo_children_div").append($updated_todo);
+        }
+    } else if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+        var progress = data.item_basic_data[0].completed || 0;
+        var right_cell = task_list.find(".progress_cell[data-progress='" + progress + "']").first();//.append(todo);
+        var dnd_target = right_cell.find(".dnd_target");
+        if (dnd_target.length) {
+            todo.insertBefore(dnd_target);
+        } else {
+            todo.appendTo(right_cell);
+        }
+        fc.highlight_elements(todo.children('.td, .todo').addBack());
+    } else {
+        todo.hide();
+        task_list.append(todo);
+        if (!todos_page.make_ordering) {
+            todo.find(".drag").hide();
+        }
+        todo.fadeIn(600, function(){
+            fc.highlight_elements(todo.children('.td, .todo').addBack());
+        });
+
+        todos_page.makeDroppable();
+    }
+    finalize_todo_add(data.f_add_another);
+    todos_page.applyImprovedFilters(data.item_basic_data);
+}
+
+function on_todo_delete(response, yes_link) {
+    var task_id = response.data.task_id;
+    $('.are_sure_dialog').remove();
+
+    var f_parent_or_current_deleted = false;
+    if (todos_page.f_comments || fkit.al_f_loaded) {
+        // confirmation was not for a subtask, so this is or parent or the task itself
+        f_parent_or_current_deleted = !yes_link.parents('#todo_children_div').length;
+
+        if (!f_parent_or_current_deleted && fkit.al_f_loaded) {
+            f_parent_or_current_deleted = (fkit.al_loaded_id == task_id);
+        }
+    }
+
+    if (todos_page.f_comments) {
+        if (f_parent_or_current_deleted) {
+            window.location = url_to_project_unique_name + "/todos";
+        } else {
+            location.reload();
+        }
+        return;
+    }
+    
+    var $td = $(".todo_wrapper#" + fc.fcif_itemid_prefix + task_id);
+
+    if (VIEW_TYPE_KANBAN === todos_page.view_type && yes_link.parents(".todo.absolute").length) {
+        var popup = $(yes_link).parents(".todo");
+        $td = $td.add(popup);
+    }
+
+    if (fkit.al_f_loaded) {
+        if (f_parent_or_current_deleted) {
+            fkit.al_close_confirm(true);
+        } else {
+            var al_wrapper = $(".todo_wrapper#view_" + fc.fcif_itemid_prefix + task_id);
+            $td = $td.add(al_wrapper);
+        }
+
+        if (VIEW_TYPE_GANTT === todos_page.view_type) {
+            ganttOnTaskDelete(response);
+        }
+    }
+
+    var children = $td.find(".todo_wrapper");
+    children.each(function(){
+        var id_to_delete = $(this).data(data_id_selector);
+        delete_td_things(id_to_delete);
+    });
+
+    delete_td_things(task_id);
+    $td.slideUp(function() {
+        $td.remove();
+        if(fkit.al_f_loaded) {
+            var numSubtasks = $("#todo_children_div > .todo_wrapper").length;
+            $('.num_subtasks').text(numSubtasks);
+            $('.show_subtasks').toggle(Boolean(numSubtasks));
+        }
+    });
+}
+
+function toggle_children(todo_wrapper, f_ignore_dimmed) {
+    var children = todo_wrapper.children(".todo_wrapper");
+
+    if (f_ignore_dimmed) {
+        todo_wrapper.removeClass('children_dimmed');
+    }
+
+    if (todo_wrapper.hasClass("children_dimmed")) {
+        children.slideDown(function(){
+            todo_wrapper.removeClass('children_dimmed');
+        });
+        return;
+    }
+
+    var hide = todo_wrapper.hasClass("children_hidden") ? 0 : 1;
+    if (hide) {
+        children.slideUp(function(){
+            todo_wrapper.addClass('children_hidden');
+        });
+    } else {
+        children.slideDown(function(){
+            todo_wrapper.removeClass('children_hidden');
+        });
+    }
+    var todo_id = todo_wrapper.data(data_id_selector);
+    todos_page.storeCollapsedState(todo_id, hide);
+}
+/* End of handling popup on both views */
+
+/* Handling tasks d&d on both views */
+todos_page.updateParentData = function(task_id) {
+    if (!task_id) {
+        return;
+    }
+    var task = $("#" + fc.fcif_itemid_prefix + task_id);
+    var children = task.children(".todo_wrapper");
+    var counter = task.find("> .td, > .todo").find(".children_count");
+
+    task.toggleClass("parent_task", !!children.length);
+    counter.toggle(!!children.length);
+
+    if (children.length) {
+        var completed_count = children.find("> .td, > .todo").find(".completion.complete").length;
+        counter.text(completed_count + "/" + children.length);
+    }
+};
+
+todos_page.handleKanbanProgressChange = function(task, group, sortable_el) {
+    var old_progress = task.data("old_progress");
+    var new_progress = task.parents(".progress_cell").data("progress");
+
+    if (old_progress == new_progress) {
+        if (todos_page.f_global) {
+            $.flash_action(tasks_board_dnd_limits, 7000, 'warn');
+            sortable_el.sortable("cancel");
+            return true;
+        }
+        return false;
+    }
+
+    if (todos_page.f_global) {
+        var old_group_id = task.data("old_group_id");
+        var new_group_id = task.parents(".todo_group").data("todogroupid");
+        if (old_group_id !== new_group_id) {
+            $.flash_action(tasks_board_dnd_limits, 7000, 'warn');
+            sortable_el.sortable("cancel");
+            return true;
+        }
+    }
+
+    var params = {};
+    params.todoid = task.data(data_id_selector);
+    params.progress = new_progress;
+    params.return_html = 1;
+    params.order_data = todos_page.getNewPlaceOrderData(task);
+    params.list_id = todos_page.f_milestones_page ? task.data('todo-group-id') : group.data("todogroupid");
+
+    if (todos_page.f_global) {
+        var url_prefix = url_prefix = task.parents(grp_sel).data("prjurlprefix");
+    } else {
+        url_prefix = url_to_project_unique_name;
+    }
+    var edit_task_url = url_prefix + "/todos/edit_todo/";
+    ajaxRequest(edit_task_url, params, function(response) {
+        todos_page.applyImprovedFilters(response.data.item_basic_data);
+    });
+    return true;
+};
+
+todos_page.fixKanbanLinesStyles = function(task_id) {
+    var task = $("#" + fc.fcif_itemid_prefix + task_id);
+    var siblings = task.find("> .todo_wrapper");
+    siblings.find("> .todo .hierarchy_line").removeClass("last_sibling");
+    var last_sibling = siblings.last();
+    if (!last_sibling.find(".todo_wrapper").length) {
+        last_sibling.find("> .todo .hierarchy_line").addClass("last_sibling");
+    }
+};
+
+todos_page.checkParentChangeAllowed = function(task, is_subtask) {
+    if (todos_page.f_subtasks_adv || !is_subtask) {
+        return true;
+    }
+    if (task.hasClass("basic") && !task.find(".todo_wrapper").length) {
+        return true;
+    }
+
+    fc.registerError('checkParentChangeAllowed(): false. Has basic: ' + task.hasClass("basic"), false, true, 'info');
+
+    return false;
+};
+
+todos_page.handleParentChange = function(task, group, sortable_el) {
+    var is_subtask = task.parents(".todo_wrapper").length ? true : false;
+    var was_subtask = task.hasClass("subtask");
+
+    if (!todos_page.f_global && !todos_page.checkParentChangeAllowed(task, is_subtask)) {
+        $.flash_action(no_change_parent_str, 7000, 'warn');
+        sortable_el.sortable("cancel");
+        return true;
+    }
+
+    if (was_subtask !== is_subtask) {
+        task.toggleClass("subtask");
+        if (!todos_page.f_subtasks_adv) {
+            task.find(".comments_link, .add_subtask").toggle(!is_subtask);
+        }
+    }
+
+    var old_parent_id = task.data("parent-id");
+    var new_parent_id = "";
+    if (is_subtask) {
+        new_parent_id = task.parent().closest(".todo_wrapper").data(data_id_selector);
+    }
+
+    if (old_parent_id == new_parent_id) {
+        return false;
+    }
+
+    if (todos_page.f_global) {
+        $.flash_action(tasks_board_dnd_limits, 7000, 'warn');
+        sortable_el.sortable("cancel");
+        return true;
+    }
+
+    task.data("parent-id", new_parent_id);
+    todos_page.updateParentData(old_parent_id);
+    todos_page.updateParentData(new_parent_id);
+
+    var h_data = {};
+    h_data.todoid = task.data(data_id_selector);
+    h_data.h_parent_id = new_parent_id;
+    h_data.return_html = 1;
+    h_data.view_type = todos_page.view_type;
+    h_data.order_data = todos_page.getNewPlaceOrderData(task);
+    h_data.list_id = todos_page.f_milestones_page ? task.data('todo-group-id') : group.data("todogroupid");
+    h_data.f_milestones_page = todos_page.f_milestones_page;
+    
+    if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+        task.find("> .todo .hierarchy_line").remove(); // just to not show while updating
+    }
+
+    // #4501844
+    var edit_task_url = url_to_project_unique_name + "/todos/edit_todo/";
+    ajaxRequest(edit_task_url, h_data, function(response){
+        var updated_task = $(response.data.html);
+        task.replaceWith(updated_task);
+        task = updated_task;
+        if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+            todos_page.fixKanbanLinesStyles(old_parent_id);
+            todos_page.fixKanbanLinesStyles(new_parent_id);
+        }
+        fc.highlight_elements(task.children('.td, .todo').addBack());
+        if (todos_page.f_milestones_page) {
+            todos_page.handleOrderUpdate(task, group, sortable_el);
+        } else {
+            if (!todos_page.f_global && VIEW_TYPE_LIST === todos_page.view_type) {
+                todos_page.makeDroppable();
+            }
+        }
+    });
+
+    return true;
+};
+
+todos_page.getNewPlaceOrderData = function(task) {
+    var data = {prev: -1, next: -1};
+    data.f_apply = todos_page.make_ordering ? 1 : 0;
+    
+    var prev_key = todos_page.custom_order_reversed ? "next" : "prev";
+    var next_key = todos_page.custom_order_reversed ? "prev" : "next";
+
+    var prev = task.prev(".todo_wrapper");
+    var next = task.next(".todo_wrapper");
+
+    if (prev.length) {
+        data[prev_key] = prev.data("order");
+    }
+
+    if (next.length) {
+        data[next_key] = next.data("order");
+    }
+
+    return data;
+}
+
+todos_page.handleOrderUpdate = function(task, group, sortable_el, f_ignore_perm_error) {
+    f_ignore_perm_error = f_ignore_perm_error ? 1 : 0;
+    var f_task_group_change = false;
+    var todo_group_id = group.data("todogroupid");
+
+    if (!todos_page.make_ordering && sortable_el) {
+        // no reorder allowed because some other order used
+        var old_group_id = task.data("old_group_id");
+        if (old_group_id == todo_group_id) {
+            // no group change - cancelling
+            $.flash_action(tasks_no_order_change, 7000, "warn");
+            sortable_el.sortable("cancel");
+            return false;
+        }
+
+        // so user wants not to reorder but to change the group
+        f_task_group_change = true;
+    }
+
+    if (f_task_group_change) {
+        var order = [task.data(data_id_selector)];
+    } else {
+        order = getGroupOrder(group);
+    }
+
+    if (todos_page.f_global) {
+        var url_prefix = url_prefix = group.data("prjurlprefix");
+    } else {
+        url_prefix = url_to_project_unique_name;
+    }
+    url_prefix += todos_page.f_milestones_page ? "/milestones" : "/todos";
+
+
+    if (fkit.al_f_loaded) {
+        // not sure why it's called before order update,
+        // probably as we do this async it's ok to start earlier to spend less time
+        fkit.al_reload();
+    }
+
+    if (todos_page.f_new_ordering) {
+        var save_order_url = url_prefix + "/todos/move_todo_new/";
+        var order_data = todos_page.getNewPlaceOrderData(task);
+        var order_data = {order_data : order_data, item_id: task.data(data_id_selector),
+                          list_id: todo_group_id, f_ignore_perm_error: f_ignore_perm_error};
+        ajaxRequest(save_order_url, order_data, function(response){
+            task.data("order", response.data.order);
+            task.find(".task_order:first").text(response.data.order);  // TEMP
+        });
+    } else {
+        var custom_order_reversed = todos_page.custom_order_reversed || 0;
+        var task_id = task.data(data_id_selector);
+        var save_order_url = url_prefix + "/move_todo/" + todo_group_id;
+        save_order_url += todos_page.f_milestones_page ? "/"+task_id : "";
+        var order_data = {'order' : order, custom_order_reversed: custom_order_reversed, f_ignore_perm_error: f_ignore_perm_error};
+        ajaxRequest(save_order_url, order_data,
+            function (response) {
+                if(response.status == 'success' && response.message) {
+                    $.flash_action(response.message);
+                    return;
+                }
+            });
+    }
+
+    if (VIEW_TYPE_LIST === todos_page.view_type) {
+        todos_page.makeDroppable();
+    }
+
+    return true;
+};
+
+todos_page.handleDnDMove = function(task, group, sortable_el) {
+    if (todos_page.handleParentChange(task, group, sortable_el)) {
+        return;
+    }
+
+    if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+        if (todos_page.handleKanbanProgressChange(task, group, sortable_el)) {
+            return;
+        }
+        todos_page.fixKanbanLinesStyles(task.data("parent-id"));
+    }
+    todos_page.handleOrderUpdate(task, group, sortable_el);
+};
+
+function get_right_offset(element) {
+    return $(window).width() - (element.offset().left + element.outerWidth());
+}
+
+todos_page.onSortEvent = function(ui) {
+    var SHIFT_X_THRESH = 70;
+    var item_id = ui.item.prop("id");
+    var placeholder = ui.placeholder;
+    var prev = placeholder.prev(".todo_wrapper:visible");
+    if (prev.prop("id") === item_id && prev.prev(".todo_wrapper").length) {
+        // sortable placeholder counts active item as a previous
+        // moving above if other item is there - so other checks will work well
+        prev.prev(".todo_wrapper").after(placeholder);
+        return;
+    }
+
+    var parent = placeholder.parent(".todo_wrapper");
+    if (!prev.length && !parent.length) {
+        // item is the first in the sortable
+        return;
+    }
+
+    var todo_body_selector = VIEW_TYPE_KANBAN === todos_page.view_type ? "> .todo" : "> .td";
+
+    var item = ui.item.find(todo_body_selector);
+    var item_x = fc.f_rtl ? get_right_offset(item) : item.offset().left;
+
+    if (prev.length) {
+        var prev_x = fc.f_rtl ? get_right_offset(prev) : prev.offset().left;
+        if ( item_x > (prev_x + SHIFT_X_THRESH) ) {
+            // there is prev element and active item is moved right - making it a subtask of prev
+            if (todos_page.f_subtasks_tree || !prev.hasClass("subtask")) {
+                prev.append(placeholder);
+                return;
+            }
+        }
+    }
+
+    if (!parent.length) {
+        // item is a task now, and no right shift - keep as is
+        return;
+    }
+
+    var next_wrapper = placeholder.next(".todo_wrapper:not(#" + item_id + ")");
+    if (next_wrapper.length) {
+        // item is a subtask now, now it's sorting between siblings as no right shift to prev item
+        return;
+    }
+
+    var parent_x = fc.f_rtl ? get_right_offset(parent) : parent.offset().left;
+
+    if (item_x < (parent_x + SHIFT_X_THRESH - 10)) {
+        // item is a last subtask under parent, and it's moved to left - so lovering it's h_level
+        parent.after(placeholder);
+    }
+}
+
+function getDnDItemSelector() {
+    var selector = ".todo_wrapper";
+    if (todos_page.f_global) {
+        selector += ":not(.subtask)";
+    }
+    return selector;
+}
+
+function initKanbanSortable(){
+    var item_selector = getDnDItemSelector();
+    $(".progress_cell").sortable({
+        tolerance: 'pointer',
+        connectWith: ".progress_cell, " + item_selector,
+        items: item_selector,
+        cancel: ".right, .left, :hidden",
+        toleranceElement: '> .todo',
+        placeholder: "ui-state-highlight",
+        start: function(event, ui) {
+            clearTimeout(todos_page.footer_timeout);
+            todos_page.footer_timeout = null;
+            removeExpandProgress();
+            ui.item.addClass("dragging");
+            ui.item.data("old_progress", $(this).data("progress"));
+            ui.item.data("old_group_id", $(this).parents(".todo_group").data("todogroupid"));
+            ui.item.find("> .todo .hierarchy_line").hide();
+        },
+        receive: function() {
+            $(this).find(".dnd_target").remove();
+        },
+        update: function(event, ui) {
+            if (this !== ui.item.closest(".progress_cell")[0]) {
+                // handler of sender event, skipping to process in target event
+                return;
+            }
+            todos_page.handleDnDMove(ui.item, $(this).parents(".todo_group"), $(this));
+            var dnd_target_before = ui.item.prev(".dnd_target, .add_td");
+            if (dnd_target_before.length) {
+                ui.item.after(dnd_target_before);
+            }
+        },
+        stop: function(event, ui) {
+            ui.item.removeClass("dragging");
+            ui.item.find("> .todo .hierarchy_line").show();
+            handleTodoMouseLeave(ui.item, true);
+        },
+        sort: function(event, ui) {
+            if (todos_page.f_global) {
+                return;
+            }
+            clearTimeout(todos_page.sort_timeout);
+            todos_page.sort_timeout = setTimeout(function(){todos_page.onSortEvent(ui);}, 30);
+        }
+    });
+}
+
+todos_page.initListSortable = function() {
+    var item_selector = getDnDItemSelector();
+    $(".td_group").sortable({
+        axis: 'x, y',
+        scrollSensitivity: 40,
+        tolerance: 'pointer',
+        placeholder: "ui-state-highlight",
+        connectWith: '.td_group, ' + item_selector,
+        items: item_selector,
+        cancel: ":hidden",
+        toleranceElement: '> .td',
+        handle: '.drag',
+        update: function (event, ui) {
+            if (this !== ui.item.closest(".td_group")[0]) {
+                // handler of sender event, skipping to process in target event
+                return;
+            }
+            todos_page.handleDnDMove(ui.item, $(this), $(this));
+        },
+        sort: function(event, ui) {
+            clearTimeout(todos_page.sort_timeout);
+            todos_page.sort_timeout = setTimeout(function(){todos_page.onSortEvent(ui);}, 20);
+        }
+    });
+};
+
+/* End of handling tasks d&d */
+
+/* Handling pagination tip on all views */
+todos_page.handlePaginationTip = function() {
+    if (!$(".news_bar").length) {
+        return;
+    }
+    if(todos_page.f_milestones_page) {
+        return;
+    }
+    $(".news_bar").toggle($(".pagination_controls").length ? true : false);
+};
+
+/* End of handling pagination tip on all views */
+
+/* KANBAN VIEW FUNCTIONS */
+todos_page.prepareKanbanHandlers = function() {
+    fc.set_view_type("viewtype_todo");
+
+    $(document).on("fcif_html_changed", function(e, params) {
+        todos_page.setColumnsViewType();
+        if (params.f_instant) {
+            return;
+        }
+        $(".todo_group").each(function(){
+            if (getTDGroupCollapsed($(this).data("todogroupid"))) {
+                $(this).addClass("collapsed");
+                $(this).find(".collapsing_title").addClass("collapsed");
+            }
+            
+            if (todos_page.f_global) {
+                // no need to handle forms
+                return;
+            }
+            todos_page.kanbanTaskAddForm($(this));
+        });
+
+        if (todos_page.f_global) {
+            todos_page.hideEmptyGroups();
+        }
+
+        todos_page.restoreCollapsing();
+
+        todos_page.handlePaginationTip();
+
+        $("#content").removeClass("hide");
+
+        initKanbanSortable();
+    });
+
+    // Kanban Add Task Inline
+    $(document).on("submit", ".add_td", function() {
+        todos_page.onInlineFormSubmit($(this));
+        return false;
+    });
+
+    $(document).on("click", ".add_td_expand", function(){
+        var add_td_wrap = $(this).parents(".add_td_wrap");
+        add_td_wrap.addClass("td_being_added");
+        add_td_wrap.find(".add_td_content").focus();
+    });
+
+    $(document).on("click", ".add_td .cancel", function(){
+        todos_page.closeKanbanInlineForm($(this));
+    });
+
+    fkit.register_esc_handler(todos_page.closeKanbanInlineForm);
+
+    $(document).on("mousedown", ".todo", function(e){
+        var originalElement = e.srcElement || e.originalTarget;
+        if ($(originalElement).parents(".actions").length || e.metaKey || e.ctrlKey) {
+            // to prevent link click event when clicked on action btn
+            // keeping to have .todo as an anchor to keep best middle-clicks behaviour
+            e.preventDefault();
+            return false;
+        }
+    });
+    
+    $(document).on("click", ".group_title .collapse_group", function(e){
+        var task_list_title = $(this).parents(".group_title");
+        var task_list_id = task_list_title.data("task-list-id");
+        if (task_list_title.hasClass("collapsed")) {
+            todos_page.expand_task_list(task_list_id);
+        } else {
+            todos_page.collapse_task_list(task_list_id);
+        }
+        return false;
+    });
+
+    $(".view_togglers .action_btn").click(function(){
+        fc.set_view_type("viewtype_todo", $(this).data("viewtype"));
+        return false;
+    });
+
+    $(document).on("mouseenter mouseleave", ".empty_footer.todo, .minimal .todo, .collapsed_column .todo", function (e) {
+        if(store.get("viewtype_todo") == 'full' && !$(this).parents('.collapsed_column').length) { // Footer is already visible when column is not collapsed and view type is 'full'. Nothing to do.
+            return;
+        }
+        
+        if (todos_page.f_global && !$(this).parents(".minimal, .collapsed_column").length) {
+            // anyway they do not have footer to show
+            return;
+        }
+
+        var EXPAND_FOOTER_TIMEOUT = 250;
+        var EXPAND_FOOTER_PROGRESS_DELAY = 100;
+        var todo_el = $(this);
+
+        if (todo_el.hasClass('absolute')) {
+            return;
+        }
+
+        if (e.type === 'mouseleave') {
+            handleTodoMouseLeave(todo_el);
+            return;
+        }
+
+        if (todo_el.hasClass("expanded")) {
+            handleTodoMouseEnter(todo_el); // to allow reexpand
+        } else {
+            todos_page.footer_timeout = setTimeout(function(){handleTodoMouseEnter(todo_el)}, EXPAND_FOOTER_TIMEOUT);
+            $("#kanban_footer_expand").appendTo(todo_el).show();
+            $("#kanban_footer_expand").stop().css({height:0, opacity:0})
+                    .delay(EXPAND_FOOTER_PROGRESS_DELAY)
+                    .animate({opacity: 1}, 1)
+                    .animate({height: '90%', opacity: 1}, EXPAND_FOOTER_TIMEOUT - EXPAND_FOOTER_PROGRESS_DELAY + 50, removeExpandProgress);
+        }
+    });
+
+    $(".title_cell").click(function(){
+        todos_page.toggleKanbanColumn($(this).data("progress"), true);
+    });
+
+    todos_page.prepareCompletionClick();
+
+    $(document).on("click", ".children_count", function(){
+        if ($(this).parents(".todo.absolute").length) {
+            return false;
+        }
+        var todo_wrapper = $(this).closest(".todo_wrapper");
+        toggle_children(todo_wrapper);
+        return false;
+    });
+
+    if (todos_page.f_global) {
+        $(document).on("fcif_instant_filter_applied", function(){
+            todos_page.hideEmptyGroups(true);
+        });
+    }
+};
+
+todos_page.closeKanbanInlineForm = function(cancel_btn) {
+    if (cancel_btn) {
+        var forms = cancel_btn.parents(".add_td_wrap");
+    } else {
+        forms = $(".td_being_added");
+    }
+    forms.removeClass("td_being_added")
+}
+
+todos_page.setColumnsViewType = function() {
+    var view_values = store.get("kanban_collapsed_columns") || {};
+    for (var key in view_values) {
+        if (view_values[key]) {
+            todos_page.toggleKanbanColumn(key, false, true);
+        }
+    }
+}
+
+todos_page.toggleKanbanColumn = function(progress, save, collapse) {
+    var column_th = $(".title_cell[data-progress='"+progress+"']");
+
+    if (typeof collapse === "undefined") {
+        collapse = !column_th.hasClass("collapsed_column");
+    }
+
+    column_th.toggleClass("collapsed_column", collapse);
+    $(".progress_cell[data-progress='"+progress+"']").toggleClass("collapsed_column", collapse);
+
+    if (save) {
+        var view_values = store.get("kanban_collapsed_columns") || {};
+        view_values[progress] = collapse;
+        store.set("kanban_collapsed_columns", view_values);
+    }
+}
+
+todos_page.hideEmptyGroups = function(f_instant) {
+    var all_groups = VIEW_TYPE_KANBAN === todos_page.view_type ? $(".todo_group") : $(".td_group");
+
+    if (f_instant) {
+        if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+            all_groups.show();
+        } else {
+            all_groups.filter(":not(.collapsed)").show();
+            $(".todo_group_title").show();
+            all_groups.next(".divider").show();
+        }
+        var hidden_groups = all_groups.filter(":not(:has(.todo_wrapper.fcif_shown))");
+    } else {
+        var hidden_groups = all_groups.filter(":not(:has(.todo_wrapper))");
+    }
+
+    hidden_groups.hide();
+    if (VIEW_TYPE_LIST === todos_page.view_type) {
+        hidden_groups.prev(".todo_group_title").hide();
+        hidden_groups.next(".divider").hide();
+    }
+
+    $("#no_items").toggle(hidden_groups.length === all_groups.length);
+};
+
+function getGroupOrder(group) {
+    var orders = [];
+
+    if (VIEW_TYPE_KANBAN === todos_page.view_type) {
+        // getting full order from all 3 columns
+        group.find(".progress_cell").each(function(){
+            $(this).find(".todo_wrapper").each(function(){
+                orders.push($(this).data(data_id_selector));
+            });
+        });
+    } else {
+        group.find(".todo_wrapper").each(function(){
+            orders.push($(this).data(data_id_selector));
+        });
+    }
+
+    return orders;
+}
+
+function removeExpandProgress(){
+    $("#kanban_footer_expand").hide().appendTo("#todos_kanban").stop();
+}
+
+function handleTodoMouseEnter(todo_el) {
+    removeExpandProgress();
+
+    if (todo_el.parents(".dragging").length) {
+        return;
+    }
+
+    if (todo_el.parents(".collapsed_column").length) {
+        showPopupCard(todo_el);
+        return;
+    }
+
+    todo_el.stop(true, true);
+    var height = todo_el.outerHeight();
+    todo_el.addClass("expanded");
+    var new_height = todo_el.outerHeight();
+    todo_el.css("height", height);
+    todo_el.data("old_height", height);
+    todo_el.animate({height: new_height});
+}
+
+function handleTodoMouseLeave(todo_el, force) {
+    clearTimeout(todos_page.footer_timeout);
+    todos_page.footer_timeout = null;
+    removeExpandProgress();
+
+    if (fc.confirm_dialog_loading || $(".are_sure_dialog:visible").length) {
+        return;
+    }
+
+    if ($(".absolute.todo").length) {
+        if (force) {
+            hidePopupCard();
+        } else if (!todos_page.popup_card_timeout) {
+            todos_page.popup_card_timeout = setTimeout(function(){hidePopupCard();}, 1000);
+        }
+        return;
+    }
+
+    var old_height = todo_el.data("old_height");
+    todo_el.data("old_height", null);
+
+    if (force) {
+        todo_el.css("height", "auto").removeClass("expanded");;
+        return;
+    }
+
+    if (!todo_el.hasClass("expanded") || !old_height) {
+        // already collapsed, probably forced
+        return;
+    }
+
+    todo_el.stop().animate({height: old_height}, function(){
+        todo_el.css("height", "auto").removeClass("expanded");
+    });
+}
+
+function showPopupCard(todo_el) {
+    hidePopupCard();
+    var todo_wrapper = todo_el.closest(".todo_wrapper");
+    var todo_id = todo_wrapper.data(data_id_selector);
+    var clone = todo_el.clone();
+    var uniqid = Date.now();
+
+    clone.attr("id", uniqid).addClass("absolute").data(data_id_selector, todo_id);
+    $("#todos_kanban").append(clone);
+
+    fkit.resetInitiadedFlags("#" + uniqid);
+    fkit.initiatePlugins("#" + uniqid);
+
+    // failed to handle with .on() above
+    clone.hover(function(){
+        clearTimeout(todos_page.popup_card_timeout);
+        todos_page.popup_card_timeout = null;
+    }, function(){
+        handleTodoMouseLeave(clone);
+    });
+
+    clone.position({
+        my: "left-45 top+20",
+        at: "center bottom",
+        of: todo_el,
+        collision: "custom"
+    });
+}
+
+function hidePopupCard() {
+    clearTimeout(todos_page.popup_card_timeout);
+    todos_page.popup_card_timeout = null;
+    var todos = $(".absolute.todo");
+    todos.stop().fadeOut(function(){todos.remove()});
+}
+
+/* END OF KANBAN VIEW FUNCTIONS */
+
+/* GANTT VIEW FUNCTIONS */
+todos_page.prepareGanttHandlers = function() {
+    $(document).on("fcif_html_changed", function(e, params){
+        todos_page.handleCollapsedForGantt();
+        todos_page.handlePaginationTip();
+        $("#content").removeClass("hide");
+        todos_page.initGantt();
+    });
+
+    $(".gantt_left_actions .action_btn").click(function(e){
+        e.preventDefault();
+        var type = $(this).data("viewtype");
+        if ("fullscreen" === type) {
+            if ($("#gantt_div").hasClass("fullscreen")) {
+                // documented detection does not always work
+                gant_tricky_collapse();
+            } else {
+                gant_tricky_expand();
+            }
+        } else if ("criticalpath" === type) {
+            setGanttCriticalPathState(true);
+        }
+        return false;
+    });
+
+    prepareGanttExport();
+};
+
+todos_page.handleCollapsedForGantt = function() {
+    var collapsed_tasks_ids = todos_page.getCollapsedTasksIDs();
+    for (var i=0; i < todos_page.gantt_data.data.length; i++) {
+        var id = todos_page.gantt_data.data[i].id;
+        var group_id = getGroupIDByGanttID(id);
+        if (group_id) {
+            if (!getTDGroupCollapsed(group_id)) {
+                continue;
+            }
+        } else if (-1 === collapsed_tasks_ids.indexOf(parseInt(id, 10))) {
+            continue;
+        }
+        todos_page.gantt_data.data[i].open = false;
+    }
+};
+
+/* END OF GANTT VIEW FUNCTIONS */
+
+todos_page.refreshAndHighlightTasks = function (task_ids) {
+    if(fkit.modal_opened) {
+        fkit.modal_opened.fkit_modal_close();
+    }
+    fcif.applied_string_hash = '';
+    if(!task_ids.length) {
+        return;
+    }
+    fcif.apply_filters(0, true, true, false, false, function () { // Make sure third flag is passed as true, so even when there are no subtasks on page, tasks are refreshed. FC#17366353
+        todos_page.scrollToTask(task_ids[0]);
+        todos_page.highlightTasks(task_ids);
+    });
+};
+
+todos_page.highlightTasks = function (task_ids, f_with_subtasks) {
+    if(!task_ids) {
+        return;
+    }
+    var taskSelectors = [];
+    var selector = '';
+    for (var i = 0; i < task_ids.length; i++) {
+        if (todos_page.view_type == VIEW_TYPE_GANTT) {
+            selector = '.gantt_row[task_id=' + task_ids[i] + ']';
+            if(f_with_subtasks) {
+                var subtasks = ganttGetTaskChildrenFlat(task_ids[i]);
+                for (var j = 0; j < subtasks.length; j++) { 
+                    taskSelectors.push('.gantt_row[task_id=' + subtasks[j] + ']');
+                }                
+            }
+        } else if(todos_page.view_type == VIEW_TYPE_KANBAN) {
+            selector = '#todo_' + task_ids[i] + (f_with_subtasks ? '' : ' .todo:first');
+        } else {
+            selector = '#todo_' + task_ids[i] + (f_with_subtasks ? '' : ' .td:first');
+        }
+        taskSelectors.push(selector);
+    }
+    fc.highlight_elements($(taskSelectors.join(',')));
+};
+
+todos_page.scrollToTask = function(task_id) {
+    if(todos_page.view_type == VIEW_TYPE_GANTT) {
+        if(gantt.isTaskExists(task_id)) {
+            gantt.showTask(task_id);
+        }
+    } else {
+        if($("#todo_" + task_id).length > 0) {
+            fc.scroll_to_element($("#todo_" + task_id), true);
+        }
+    }
+};
+
+todos_page.getTaskListSelector = function(task_list_id) {
+    if(!task_list_id) {
+        return '';
+    }
+    if(todos_page.view_type == VIEW_TYPE_GANTT) {
+        return '';
+    }
+    return '#todo_group_' + task_list_id;
+};
+
+todos_page.collapse_task_list = function(task_list_id) {
+    todos_page.toggle_task_list(task_list_id, true);
+};
+
+todos_page.expand_task_list = function(task_list_id) {
+    todos_page.toggle_task_list(task_list_id, false);
+};
+
+todos_page.toggle_task_list = function(task_list_id, f_collapse) {
+    if(todos_page.view_type == VIEW_TYPE_GANTT) {
+        return;
+    }
+    var task_list = $(todos_page.getTaskListSelector(task_list_id));
+    var f_is_collapsed = task_list.hasClass("collapsed");
+    if(f_collapse == f_is_collapsed) {
+        return; // Already collapsed or expanded
+    }
+    var f_list_view = todos_page.view_type == VIEW_TYPE_LIST;
+    var task_list_title;
+    if(f_list_view) {
+        task_list_title = $(".todo_group_title[data-task-list-id='" + task_list_id + "']");
+    } else {
+        task_list_title = $(".group_title[data-task-list-id='" + task_list_id + "']");
+    }
+    task_list.toggleClass("collapsed", f_collapse);
+    task_list_title.toggleClass("collapsed", f_collapse);
+    
+    setTDCroupCollapsed(task_list_id, f_collapse);
+    if(f_list_view) {
+        if(todos_page.make_ordering) {
+            task_list.sortable("option", "disabled", f_collapse);
+        }
+        task_list.toggle(!f_collapse);
+        task_list_title.find('.mile_desc').toggle(!f_collapse);
+        $("#todo_group_form_" + task_list_id).toggle(!f_collapse);
+    }
+};
+
+function onTaskActionsDropdownOpen(state, self) {
+    if(todos_page.view_type != VIEW_TYPE_LIST || state != 'open') {
+        return;
+    }
+    $(self).parents('.td').addClass('show_task_actions');
+    fc.outer_click_type = 'task_actions_outer_click';
+};
+
+function onImportFileUploaded(file_info) {
+    var file_path = file_info.name;
+    $('#file_name').val(file_path);
+    $("#submit_file_btn").removeClass("disabled");
+}
+
+// Source: https://stackoverflow.com/a/3866442/214547
+function moveCaretToEnd(contentEditableElement)
+{
+    var range, selection;
+    if (document.createRange) { 
+        range = document.createRange();
+        range.selectNodeContents(contentEditableElement);
+        range.collapse(false);
+        selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+    } else if (document.selection) {
+        range = document.body.createTextRange();
+        range.moveToElementText(contentEditableElement);
+        range.collapse(false);
+        range.select();
+    }
+}

@@ -1,0 +1,374 @@
+fc.cmntsModule = {};
+
+function initialize_add_form(focus_on_load) {
+    if(typeof CKEDITOR.instances['add_comment_wysiwyg'] !== 'undefined') {
+        CKEDITOR.instances['add_comment_wysiwyg'].destroy();
+    }
+
+    var ckeditor_options = jQuery.extend({}, ckeditor_standard_options);
+    ckeditor_options['width'] = '99.7%';
+    if(focus_on_load) {
+        ckeditor_options['startupFocus'] = true;
+    }
+    if (fkit.al_f_loaded) {
+        fkit.al_editor_load_start_date = new Date();
+    }
+    fc.initCustomizeEditorLink();
+    $("#add_comment_wysiwyg").ckeditor(ckeditor_options);
+    CKEDITOR.instances['add_comment_wysiwyg'].setData('');
+    fc.improveCKEditor("#add_comment_wysiwyg", !fc.cmntsModule.f_files_upload);
+}
+
+function initialize_edit_form() {
+    if(!fc.cmntsModule.tx_id) {
+        return;
+    }
+    if(typeof CKEDITOR.instances[fc.cmntsModule.tx_id] !== 'undefined') {
+        CKEDITOR.instances[fc.cmntsModule.tx_id].destroy();
+    }
+    $("#"+fc.cmntsModule.tx_id).ckeditor({
+        toolbar: ckeditor_std_toolbar,
+        uiColor : '#F0F0F0',
+        height : '80px',
+        width   : '100%',
+        indentClasses: ['ck_indent1', 'ck_indent2', 'ck_indent3'],
+        contentsCss: [CKEDITOR_BASEPATH+'contents.css?ver=2', cdn_url+'platform/css/editor.css', CKEDITOR_BASEPATH+'plugins/mentions/contents.css'],
+        disableNativeSpellChecker: false,
+        removePlugins: ckeditor_remove_plugins,
+        extraAllowedContent: ckeditor_extra_allowed_content,
+        extraPlugins: ckeditor_extraPlugins
+    });
+    fc.improveCKEditor("#"+fc.cmntsModule.tx_id);
+}
+
+function get_upload_block(comment_id) {
+    var uploadBlock = $("#upload_template_container .fc_upload_block").clone();
+    uploadBlock.attr('id', 'comm_upload_block_' + comment_id);
+    uploadBlock.attr('data-commentid', comment_id);
+    return uploadBlock;
+}
+
+function initialize_upload_block(comment_id) {
+    var uploadBlockContainer = $('#comment_upload_block_' + comment_id);
+    if(uploadBlockContainer.find('.fc_upload_block').length) {
+        return;
+    }
+    var uploadBlock = get_upload_block(comment_id);
+    uploadBlockContainer.append(uploadBlock);
+    initUploadsBlock("#comm_upload_block_" + comment_id);
+}
+
+function doesContain(node, container) {
+    while (node) {
+        if (node === container) {
+            return true;
+        }
+        node = node.parentNode;
+    }
+    return false;
+}
+
+function getElementSelection(el) {
+    var sel;
+    if (window.getSelection) {
+        sel = window.getSelection();
+        if (sel.rangeCount > 0) {
+            for (var i = 0; i < sel.rangeCount; ++i) {
+                if (!doesContain(sel.getRangeAt(i).commonAncestorContainer, el)) {
+                    sel.removeRange(sel.getRangeAt(i));
+                }
+            }
+            return sel.rangeCount > 0 ? sel : '';
+        }
+    } else if ((sel = document.selection) && sel.type != "Control") {
+        return doesContain(sel.createRange().parentElement(), el) ? sel : '';
+    }
+    return '';
+}
+
+$(document).ready(function() {
+
+    // Allows you to quote any comment by appending a blockquote with its content and author
+    $(document).on("click", ".reply-to-comment", function(e){
+        e.preventDefault();
+        var $comment = $(this).parents(".ci");
+        var commentValue = '';
+        var commentAuthor = $comment.find("span.name").text();
+        // If comment does not contain any paragraphs we improve it by adding a surrounding one
+        var selection = getElementSelection($comment.find("span.comment_content")[0]);
+        if (selection) {
+            var p_tag = document.createElement('p');
+            for (var i = 0; i < selection.rangeCount; ++i) {
+                var range = selection.getRangeAt(i);
+                p_tag.appendChild(range.cloneContents().cloneNode(true));
+                if(p_tag.innerHTML){
+                    commentValue += (p_tag.innerHTML.indexOf('<p>') === -1) ? p_tag.outerHTML : p_tag.innerHTML;
+                }
+                p_tag.innerHTML = '';
+            }
+            selection.removeAllRanges();
+        }
+        if(!commentValue){
+            commentValue = $comment.find("textarea.ckeditor_w").val();
+        }
+        if (commentValue.indexOf('<p>') === -1) {
+            commentValue = '<p>' + commentValue + '</p>';
+        }
+        CKEDITOR.instances['add_comment_wysiwyg'].insertHtml('<blockquote><p>'+commentAuthor+' said:</p>'+commentValue+'</blockquote><p>&nbsp;</p>');
+        CKEDITOR.instances['add_comment_wysiwyg'].on('change', function() { 
+            if(!CKEDITOR.instances['add_comment_wysiwyg'].getData().length) {
+                fc.cmntsModule.rep_to_user_ids = [];
+            }
+        });
+        fc.cmntsModule.rep_to_user_ids.push($comment.data('author-id'));
+    });
+
+    $(document).on("submit", ".comment_form", function(){
+        var li = $(this).parents("li");
+        var commentid = li.find('.commentid').val();
+        var description = li.find(".ckeditor_w").val();
+
+        if (description.trim().length === 0) {
+            alert(fc.cmntsModule.lang_enter_description);
+            return false;
+        }
+
+        var attachedIds = $(this).find(".fc_upload_ids").val();
+        ajaxRequest(fc.cmntsModule.edit_url, {
+            "commentid" : commentid,
+            "description" : description,
+            "item_id" : fc.cmntsModule.itemId,
+            "attached_ids": attachedIds
+        }, onCommentUpdate);
+        return false;
+    });
+
+    function onCommentUpdate(data) {
+        var comment_id = data.data.comment_id;
+        var content_span = $("#comment-"+comment_id + " span.comment_content");
+        content_span.html(data.data.description);
+        content_span.fadeIn().end()
+            .find(".pre_edit").show().end()
+            .find(".post_edit").hide().end()
+            .find(".edit_comment").hide().end()
+            .find(".comments_description_edit").hide();
+        Shadowbox.setup("a.shadowbox-open");
+
+        CKEDITOR.instances[fc.cmntsModule.tx_id].destroy();
+        $("#comment_" + comment_id).val(data.data.description_raw);
+
+        fc.cmntsModule.tx_id = false;
+        //Reload attachments
+        $('#comment-' + comment_id + ' .attachments_html').html(data.data.attachments_html);
+        resetUploadsBlock("#comment-" + comment_id + " .fc_upload_block");
+    }
+
+    $(document).on("click", ".edit_comment_button", function(e){
+        e.preventDefault();
+        if (!fc.cmntsModule.tx_id) {
+            var li = $(this).closest('li.ci');
+            var commentId = li.data('comment-id');
+            fc.cmntsModule.tx_id = li.find(".comments_description_edit").attr("id");
+            initialize_edit_form();
+            if(fc.cmntsModule.f_files_upload) {
+                initialize_upload_block(commentId);
+            }
+            li.find("span.comment_content").hide()
+                .end().find(".edit_comment").show()
+                .end().find(".pre_edit").hide()
+                .end().find(".post_edit").show();
+        } else {
+            alert(fc.cmntsModule.lang_already_editing);
+        }
+    });
+
+    $(document).on("click", ".cancel_edit", function(e){
+        e.preventDefault();
+        fc.cmntsModule.tx_id = $(this).parents(".comments_list li").find(".comments_description_edit").attr("id");
+        var commentId = $(this).closest("li.ci").attr('id');
+        resetUploadsBlock("#" + commentId + ' .fc_upload_block');
+        CKEDITOR.instances[fc.cmntsModule.tx_id].destroy(true);
+        $(this).parents(".comments_list li").find("span.comment_content").show()
+            .end().find(".edit_comment").hide()
+            .end().find(".pre_edit").show()
+            .end().find(".post_edit").hide();
+        fc.cmntsModule.tx_id = false;
+    });
+
+    $(document).on("submit",".add_new_comment",function(e) {
+        e.preventDefault();
+
+        var $th = $(this);
+
+        var aParams = $th.serializeFormJSON();
+
+        aParams['comment_description'] = $.trim(aParams['comment_description']);
+        aParams['files_upload'] = fc.cmntsModule.file_upload;
+        aParams['replied_user_ids'] = fc.cmntsModule.rep_to_user_ids;
+
+        //editor uses <p> as line container, so each line framed with this tag
+        var spaces_re = new RegExp('&nbsp;', 'g');
+        var p_re = new RegExp('<p></p>', 'g');
+
+        var desc = aParams['comment_description'].replace(spaces_re, '').replace(/\s+/g, '').replace(p_re, '').replace(/\s+/g, '');
+        if(!aParams['comment_description'].length || !desc.length) {
+            alert(fc.cmntsModule.lang_enter_description);
+            return false;
+        }
+
+        if (!fc.forbidFormSubmit($th)) {
+            return false;
+        }
+
+        var $cover = $('<div id="temp_cover_ajax"><img src="' + cdn_url + 'images/ajax-loader.gif" style="position:absolute; top:50%; left:50%;" /></div>');
+        $th.append($cover);
+        var add_url = $th.attr('action');
+
+        ajaxRequest(
+            add_url,
+            aParams,
+            function(response){
+                if(!$('.comments_list .ci').length) {//first comment
+                    $('.comments_list li:first').hide();//No comments line
+                }
+                if (fc.cmntsModule.f_people_app) {
+                    $('.comments_list .ca').after(response.data.html);
+                    $(".add_new_status").show();
+                    $(".comments_list .ca").hide();
+                } else {
+                    $('.comments_list .ca').before(response.data.html);
+                }
+                CKEDITOR.instances.add_comment_wysiwyg.updateElement(); // Rost: not sure that we still need it.
+                initialize_add_form();
+
+                $('.timeago').timeago();
+                if(typeof Shadowbox !== 'undefined') {
+                    Shadowbox.setup("a.shadowbox-open");
+                }
+                if(typeof(fc.afterAddComment) == 'function') {
+                    fc.afterAddComment();
+                }
+
+                if (fc.cmntsModule.file_upload) {
+                    resetUploadsBlock(".add_new_comment .fc_upload_block");
+                }
+
+                //remove delete item confirm popup
+                $('.are_sure_dialog').remove();
+                $( "body" ).trigger("comment_added",{
+                    item_id: fc.cmntsModule.itemId,
+                    comments_count: $(".comments_list .ci").length
+                });
+            }
+        );
+    });
+
+});
+
+function delete_comment($elem) {
+    var delete_url = $elem.attr('href');
+
+    ajaxRequest(delete_url,function(response) {
+        $elem.parents('.ci:first').slideUp().remove();
+        $( "body" ).trigger("comment_deleted",{
+            item_id: fc.cmntsModule.itemId,
+            comments_count: $(".comments_list .ci").length
+        });
+    });
+}
+
+
+$(document).ready(function() {
+    $(document).on("click", ".like-comment", function(e) {
+        e.preventDefault();
+        var $th = $(this);
+        var comment_id = $th.parents(".ci").data("comment-id");
+        var liked =  $th.data("liked") === 1 ? 0 : 1; // If it's currently liked we are not changing it to not liked and vise versa
+        var project_url = (typeof todos_page !== 'undefined' && todos_page.f_global) ? fkit.al_url_to_project_unique : url_to_project_unique_name;
+        var add_url = project_url + "/comments_module/set_comment_like";
+        var aParams = {comment_id:comment_id, action:liked};
+        ajaxRequest(
+            add_url,
+            aParams,
+            function(response){
+                var $likedTimes = $th.find(".liked-times");
+                if(liked) { // Add Like
+                    $th.removeClass("liked_0").addClass("liked_1");
+                    $th.data("liked",1);
+                    $th.find('use').attr('xlink:href', '#heart');
+                    $th.tooltipster('disable');
+                } else {
+                    $th.removeClass("liked_1").addClass("liked_0");
+                    $th.data("liked",0);
+                    $th.find('use').attr('xlink:href', '#heart-empty');
+                    $th.tooltipster('enable');
+                }
+                $th.parents(".comment-like").find(".liked").remove();
+                $likedTimes.text(response.data.comment_likes_count);
+            }
+        );
+    });
+    var get_likes_request_started = false;
+    var likes_popup_timeout = null;
+    var mouse_over = false;
+    $(document).on("mouseenter", "li.comment-like", function() {
+        mouse_over = true;
+        var $th = $(this).find("a.like-comment");
+        var vote_cnt = $th.find('.liked-times').html();
+        if(parseInt(vote_cnt)) {
+            $th.tooltipster('disable');
+        }
+        clearTimeout(likes_popup_timeout); // as there may be accidental hover on another likes block
+        likes_popup_timeout = setTimeout(function(){showLikesPopup($th);}, 200);
+    });
+
+    $(document).on("mouseleave", "li.comment-like", function() {
+        mouse_over = false;
+        var $th = $(this);
+        clearTimeout(likes_popup_timeout);
+        $th.find(".liked").hide();
+    });
+
+    function showLikesPopup($th) {
+        // If there are no likes do nothing
+        if ($th.find(".liked-times").text() === "0") {
+            return;
+        }
+
+        var $li = $th.parents(".comment-like");
+        // If the panel has already been ajax loaded just show it and exit
+        if ($li.find(".liked").length) {
+            $li.find(".liked").show();
+            return;
+        }
+
+        // If the ajax request has already started wait for it to finish by exiting
+        if (get_likes_request_started) {
+            return;
+        }
+        var comment_id = $th.parents(".ci").data("comment-id");
+        var application_id = fc.cmntsModule.application_id;
+        var project_url = (typeof todos_page !== 'undefined' && todos_page.f_global) ? fkit.al_url_to_project_unique : url_to_project_unique_name;
+
+        var get_likes_url = project_url + "/comments_module/get_comment_likes";
+        var aParams = {comment_id:comment_id,application_id:application_id};
+        get_likes_request_started = true;
+        ajaxRequest(
+            get_likes_url,
+            aParams,
+            function (response) {
+                var $list = $(response.data.html);
+                var $likedTimes = $th.find(".liked-times");
+                // If someone liked while you loaded page update the number to new number
+                $likedTimes.text($list.find("ul.liked-by li").length);
+                $li.append($list);
+                // Edge case when you hover, ajax starts, but by the time AJAX is done you are already on another element
+                // Also if we loaded via ajax and person who liked before has unliked we don't show broken popup
+                if ( mouse_over && $list.find("ul.liked-by li").length ) {
+                    $li.find(".liked").show();
+                }
+                get_likes_request_started = false;
+            }
+        );
+    }
+});

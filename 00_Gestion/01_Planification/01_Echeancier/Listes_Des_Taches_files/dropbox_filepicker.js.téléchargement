@@ -1,0 +1,50 @@
+(function(jQuery) {
+    
+    $(document).off("click", ".upload_dropbox_link");
+    $(document).on("click", ".upload_dropbox_link",function() {
+        var block = $(this).parents('.fc_upload_block');
+        var multiSelect = block.data('no_multi') ? false : true;
+        options = {
+            success: function(files) {
+                $.each(files, function(key, file) {
+                    var params = {};
+                    var preview_link = file['link'];
+                    var download_url = preview_link.replace('dl=0','dl=1');
+                    params['application_id'] = block.data('appid');
+                    params['item_id'] = block.data('itemid');
+                    params['comment_id'] = block.data('commentid');
+                    params['temporary'] = block.data('temp');
+                    params['fversion_id'] = block.data('firstversion');
+                    params['dropbox_file'] = {};
+                    params['dropbox_file']['title'] = file['name'];
+                    params['dropbox_file']['url'] = preview_link;
+                    params['dropbox_file']['downloadUrl'] = download_url;
+                    params['dropbox_file']['size'] = file['bytes'];
+
+                    var temp_file_id = 'd_' + Math.round((Math.random() * 1000));
+                    var file_info = {
+                        'id': temp_file_id,
+                        'name': file['name'],
+                        ext_type: 'dropbox',
+                        start: true,
+                        size: file['bytes']
+                    };
+                    block.fcUpload('external_file', file_info);
+
+                    var url = getCurrentUploadFileUrl() + '/dropbox_module/add/';
+                    ajaxRequest(url, params, function (response) {
+                        response.data.temp_id = temp_file_id;
+                        response.data.start = false;
+                        block.fcUpload('external_file', response.data);
+                    });
+                })
+            },
+            // Optional. "preview" (default) is a preview link to the document for sharing,
+            // "direct" is an expiring link to download the contents of the file. For more
+            // information about link types, see Link types below.
+            linkType: "preview", // or "direct"
+            multiselect: multiSelect
+        };
+        Dropbox.choose(options);
+    })
+})($);
